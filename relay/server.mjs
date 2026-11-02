@@ -91,9 +91,6 @@ function loadTataPlayCatalog() {
               partner: "tataplay",
             };
             map.set(item.id, entry);
-            if (item.externalId) {
-              map.set(item.externalId, entry);
-            }
           }
         }
         tataPlayCatalog = map;
