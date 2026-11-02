@@ -21,6 +21,7 @@
 
 import { streamProxyUrl } from "@/lib/stream-proxy";
 import { loadJioTvChannelDetail, buildJioTvPlaylistUrl } from "./jiotv";
+import rawTataPlayChannels from "@/data/tataplay-channels.json";
 
 const API_BASE = "https://5093.dsp1.ott.kaltura.com/api_v3/service";
 const PARTNER_ID = "5093";
@@ -66,10 +67,11 @@ export interface VzyChannel {
 }
 
 export const VZY_COLLECTIONS = [
-  { id: "all", label: "All channels (318)" },
-  { id: "free", label: "Free to watch (47)" },
-  { id: "jiohotstar", label: "JioHotstar (116)" },
-  { id: "sonyliv", label: "SonyLIV (25)" },
+  { id: "all", label: "All channels" },
+  { id: "tataplay", label: "Tata Play+" },
+  { id: "free", label: "Free to watch" },
+  { id: "jiohotstar", label: "JioHotstar" },
+  { id: "sonyliv", label: "SonyLIV" },
   { id: "news", label: "News" },
   { id: "entertainment", label: "Entertainment" },
   { id: "movies", label: "Movies" },
@@ -99,6 +101,7 @@ export function matchesVzyCollection(
 ): boolean {
   if (collection === "all") return true;
   if (collection === "free") return channel.playable;
+  if (collection === "tataplay") return channel.partner?.toLowerCase() === "tataplay";
   if (collection === "jiohotstar") return channel.partner?.toLowerCase() === "jiohotstar";
   if (collection === "sonyliv") return channel.partner?.toLowerCase() === "sonyliv";
   const category = channel.category.toLowerCase();
@@ -108,9 +111,20 @@ export function matchesVzyCollection(
   return category.includes(collection);
 }
 
-/** Wraps an HLS or MPD URL in the same-origin proxy with the Watcho Referer header. */
-export function vzyStreamProxyUrl(streamUrl: string): string {
-  return streamProxyUrl(streamUrl, VZY_STREAM_HEADERS);
+/** Tata Play stream headers for upstream Akamai playback. */
+export const TATAPLAY_STREAM_HEADERS = {
+  Referer: "https://watch.tataplay.com/",
+  Origin: "https://watch.tataplay.com",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+} as const;
+
+/** Wraps an HLS or MPD URL in the same-origin proxy with upstream headers. */
+export function vzyStreamProxyUrl(
+  streamUrl: string,
+  headers: Record<string, string> = VZY_STREAM_HEADERS,
+): string {
+  return streamProxyUrl(streamUrl, headers);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -247,6 +261,33 @@ export async function resolveVzyStream(
   const drmTypeLower = (channel.drmType || "").toLowerCase();
   const token = customToken || getStoredVzyAuth()?.token;
   const hasDirectStream = Boolean(channel.hlsUrl || channel.dashUrl);
+
+  // 0. Tata Play channels: direct MPD and DASH manifests from tataplaysmart - NO JioTV fallback!
+  if (partnerLower === "tataplay") {
+    const streamUrl = channel.dashUrl || channel.hlsUrl;
+    if (!streamUrl) {
+      throw new Error(`Tata Play channel ${channel.name} has no valid stream manifest`);
+    }
+
+    const isDash = streamUrl.includes(".mpd") || !channel.hlsUrl;
+    const relay = !ignoreRelay ? vzyRelayUrl() : null;
+
+    if (relay) {
+      return {
+        url: `${relay}/live/${encodeURIComponent(channel.id)}.${isDash ? "mpd" : "m3u8"}`,
+        format: isDash ? "dash" : "hls",
+        drm: channel.drm,
+        protectionData: (channel as unknown as { protectionData?: Record<string, unknown> }).protectionData,
+      };
+    }
+
+    return {
+      url: vzyStreamProxyUrl(streamUrl, TATAPLAY_STREAM_HEADERS),
+      format: isDash ? "dash" : "hls",
+      drm: channel.drm,
+      protectionData: (channel as unknown as { protectionData?: Record<string, unknown> }).protectionData,
+    };
+  }
 
   // 1. Relay-first when a relay URL is configured (e.g. VITE_VZY_RELAY_URL or localStorage["nuvio.vzy.relayUrl"])
   // Only route to relay if the channel actually has a direct stream in Kaltura OTT.
@@ -747,7 +788,7 @@ async function withTimeout<T>(
   }
 }
 
-/** Loads every live channel from the VZY / Watcho Kaltura OTT directory (all 318 channels). */
+/** Loads every live channel from the VZY / Watcho directory and Tata Play Smart catalog. */
 export async function loadVzyChannels(
   signal: AbortSignal,
 ): Promise<VzyChannel[]> {
@@ -755,40 +796,48 @@ export async function loadVzyChannels(
     return directoryCache.channels;
   }
 
-  const channels = await withTimeout(
+  const tataPlayChannels = ((rawTataPlayChannels as unknown as VzyChannel[]) || []).map((c) => ({
+    ...c,
+  }));
+
+  const kalturaChannels = await withTimeout(
     signal,
     DIRECTORY_TIMEOUT_MS,
     async (inner) => {
-      let session = await loadSession(inner);
-      let listed: VzyListResult;
       try {
-        listed = await listLiveAssets(session.ks, inner);
-      } catch {
-        // The anonymous session can expire between calls; mint a fresh one once.
-        session = await loadSession(inner, true);
-        listed = await listLiveAssets(session.ks, inner);
-      }
-
-      const objects = listed.objects ?? [];
-      if (objects.length === 0) throw new Error("VZY returned no channels");
-
-      const mapped = objects
-        .map(mapVzyAsset)
-        .filter((channel): channel is VzyChannel => channel !== null);
-
-      mapped.sort((a, b) => {
-        // Prioritize playable channels first, then by LCN, then by name
-        if (a.playable !== b.playable) {
-          return a.playable ? -1 : 1;
+        let session = await loadSession(inner);
+        let listed: VzyListResult;
+        try {
+          listed = await listLiveAssets(session.ks, inner);
+        } catch {
+          // The anonymous session can expire between calls; mint a fresh one once.
+          session = await loadSession(inner, true);
+          listed = await listLiveAssets(session.ks, inner);
         }
-        const lcnOrder =
-          (a.lcn ?? Number.MAX_SAFE_INTEGER) - (b.lcn ?? Number.MAX_SAFE_INTEGER);
-        return lcnOrder || a.name.localeCompare(b.name);
-      });
-      return mapped;
-    },
-  );
 
-  directoryCache = { at: Date.now(), channels };
-  return channels;
+        const objects = listed.objects ?? [];
+        return objects
+          .map(mapVzyAsset)
+          .filter((channel): channel is VzyChannel => channel !== null);
+      } catch (err) {
+        console.warn("[Vzy] Kaltura catalog fetch error:", err);
+        return [];
+      }
+    },
+  ).catch(() => []);
+
+  const combined = [...kalturaChannels, ...tataPlayChannels];
+
+  combined.sort((a, b) => {
+    // Prioritize playable channels first, then by LCN, then by name
+    if (a.playable !== b.playable) {
+      return a.playable ? -1 : 1;
+    }
+    const lcnOrder =
+      (a.lcn ?? Number.MAX_SAFE_INTEGER) - (b.lcn ?? Number.MAX_SAFE_INTEGER);
+    return lcnOrder || a.name.localeCompare(b.name);
+  });
+
+  directoryCache = { at: Date.now(), channels: combined };
+  return combined;
 }

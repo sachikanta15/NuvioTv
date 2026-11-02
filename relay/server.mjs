@@ -65,6 +65,48 @@ let channelCatalog = new Map();
 let catalogLastFetched = 0;
 const CATALOG_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
+/** Tata Play channel catalog cache */
+let tataPlayCatalog = new Map();
+
+function loadTataPlayCatalog() {
+  const possiblePaths = [
+    path.join(__dirname, "../web/src/data/tataplay-channels.json"),
+    path.join(__dirname, "data/tataplay-channels.json"),
+    path.join(__dirname, "tataplay-channels.json"),
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        const raw = fs.readFileSync(p, "utf-8");
+        const list = JSON.parse(raw);
+        const map = new Map();
+        for (const item of list) {
+          if (item && item.id) {
+            const entry = {
+              id: item.id,
+              name: item.name,
+              category: item.category,
+              dashUrl: item.dashUrl,
+              hlsUrl: item.hlsUrl,
+              partner: "tataplay",
+            };
+            map.set(item.id, entry);
+            if (item.externalId) {
+              map.set(item.externalId, entry);
+            }
+          }
+        }
+        tataPlayCatalog = map;
+        console.log(`[Relay] Loaded ${list.length} Tata Play channels from ${path.basename(p)}.`);
+        return map;
+      } catch (err) {
+        console.warn("[Relay] Failed reading Tata Play channels:", err.message);
+      }
+    }
+  }
+  return new Map();
+}
+
 /** Optional local channels.json override */
 function loadCustomOverrides() {
   const overridePath = path.join(__dirname, "channels.json");
@@ -247,12 +289,19 @@ function rewriteDashManifest(text, manifestUrl) {
   return rewritten;
 }
 
-/** Helper to construct upstream headers without leaking Watcho origin to Jio CDN */
+/** Helper to construct upstream headers without leaking Watcho origin to Jio/Tata CDNs */
 function getUpstreamHeaders(targetUrl, clientHeaders = {}) {
   const isJio = targetUrl.toLowerCase().includes("jio.com");
+  const isTata = targetUrl.toLowerCase().includes("tatasky") || targetUrl.toLowerCase().includes("tataplay");
   return {
-    "User-Agent": clientHeaders["user-agent"] || "Mozilla/5.0 NuvioTV/1.0",
-    ...(isJio ? {} : { Referer: DEFAULT_REFERER, Origin: "https://www.watcho.com" }),
+    "User-Agent":
+      clientHeaders["user-agent"] ||
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ...(isJio
+      ? {}
+      : isTata
+      ? { Referer: "https://watch.tataplay.com/", Origin: "https://watch.tataplay.com" }
+      : { Referer: DEFAULT_REFERER, Origin: "https://www.watcho.com" }),
   };
 }
 
@@ -362,13 +411,26 @@ const server = http.createServer(async (req, res) => {
     if (channelCatalog.size === 0 || Date.now() - catalogLastFetched > CATALOG_TTL_MS) {
       await fetchKalturaCatalog();
     }
+    if (tataPlayCatalog.size === 0) {
+      loadTataPlayCatalog();
+    }
     const overrides = loadCustomOverrides();
-    const channels = Array.from(channelCatalog.values()).map((c) => ({
-      ...c,
-      override: overrides.has(c.id),
-      relayHls: `${relayOrigin}/live/${c.id}.m3u8`,
-      relayDash: c.dashUrl ? `${relayOrigin}/live/${c.id}.mpd` : null,
-    }));
+    const channels = [
+      ...Array.from(channelCatalog.values()).map((c) => ({
+        ...c,
+        override: overrides.has(c.id),
+        relayHls: `${relayOrigin}/live/${c.id}.m3u8`,
+        relayDash: c.dashUrl ? `${relayOrigin}/live/${c.id}.mpd` : null,
+      })),
+      ...Array.from(tataPlayCatalog.values())
+        .filter((c, idx, arr) => arr.findIndex((x) => x.id === c.id) === idx)
+        .map((c) => ({
+          ...c,
+          override: overrides.has(c.id),
+          relayHls: c.hlsUrl ? `${relayOrigin}/live/${c.id}.m3u8` : null,
+          relayDash: c.dashUrl ? `${relayOrigin}/live/${c.id}.mpd` : null,
+        })),
+    ];
 
     res.writeHead(200, { "Content-Type": "application/json", ...CORS_HEADERS });
     res.end(JSON.stringify({ count: channels.length, channels }));
@@ -384,6 +446,17 @@ const server = http.createServer(async (req, res) => {
     const overrides = loadCustomOverrides();
     let upstreamUrl = overrides.get(channelId)?.url;
 
+    // Check Tata Play Catalog
+    if (!upstreamUrl) {
+      if (tataPlayCatalog.size === 0) {
+        loadTataPlayCatalog();
+      }
+      const tp = tataPlayCatalog.get(channelId);
+      if (tp) {
+        upstreamUrl = format === "mpd" ? tp.dashUrl : tp.hlsUrl || tp.dashUrl;
+      }
+    }
+
     // Check Kaltura Catalog
     if (!upstreamUrl) {
       if (channelCatalog.size === 0 || Date.now() - catalogLastFetched > CATALOG_TTL_MS) {
@@ -395,8 +468,9 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // If still not found, check JioTV resolver
-    if (!upstreamUrl && handleJioTvDirect) {
+    // If still not found, check JioTV resolver (NEVER use JioTV fallback for Tata Play channels!)
+    const isTataPlay = channelId.startsWith("tp-") || tataPlayCatalog.has(channelId);
+    if (!upstreamUrl && !isTataPlay && handleJioTvDirect) {
       const jio = await resolveJioTvStream(channelId);
       if (jio) {
         const targetPath = `/jiotv-api/playlist.m3u8?u=${encodeURIComponent(jio.source)}${jio.keyParam}`;
