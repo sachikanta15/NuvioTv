@@ -148,6 +148,14 @@ export function VzyPlayer({
   // Handle playback / CDN failures with relay-to-direct fallback
   useEffect(() => {
     if (playbackError) {
+      if (channel.partner === "tataplay") {
+        const msg = `${channel.name} requires an active Tata Play subscriber login to stream. Sign in with your registered mobile number.`;
+        setResolutionError(msg);
+        setUnavailable(true);
+        setLoading(false);
+        return;
+      }
+
       if (sourceModeRef.current === "relay" && !fallbackInProgressRef.current) {
         console.warn(
           "[VzyPlayer] Playback error on relay, falling back to direct stream...",

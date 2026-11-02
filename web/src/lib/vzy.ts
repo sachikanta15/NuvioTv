@@ -281,6 +281,13 @@ export async function resolveVzyStream(
       };
     }
 
+    const isDirect = streamUrl.includes("delta") || streamUrl.includes("cable") || streamUrl.includes("jansetu") || streamUrl.includes("tvpunjab") || streamUrl.includes("5centscdn");
+    if (!isDirect && (channel.drm || !channel.free)) {
+      throw new Error(
+        `${channel.name} requires Tata Play subscriber authorization on Akamai CDN. Sign in with your registered mobile number or start the stream relay.`,
+      );
+    }
+
     return {
       url: vzyStreamProxyUrl(streamUrl, TATAPLAY_STREAM_HEADERS),
       format: isDash ? "dash" : "hls",
