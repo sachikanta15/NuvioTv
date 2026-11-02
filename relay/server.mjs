@@ -217,13 +217,13 @@ async function resolveTataPlayLiveStream(channelId) {
 
     if (!res.ok) {
       console.warn(`[Relay] Tata Play content-detail error for ${channelId}: status ${res.status}`);
-      return defaultUrl;
+      return null;
     }
 
     const json = await res.json();
     const encryptedUrl = json?.data?.dashPlayreadyPlayUrl || json?.data?.dashWidewinePlayUrl;
     if (!encryptedUrl) {
-      return defaultUrl;
+      return null;
     }
 
     let decryptedUrl = decryptTataPlayUrl(encryptedUrl, "aesEncryptionKey");
@@ -407,6 +407,114 @@ async function resolveJioTvStream(channelId) {
     console.warn(`[Relay] JioTV resolve error for ${channelId}:`, err.message);
     return null;
   }
+}
+
+/** In-memory JioTV channel mapping cache */
+let jioChannelMap = new Map();
+let jioChannelMapFetched = 0;
+const JIO_MAP_TTL_MS = 60 * 60 * 1000;
+
+async function fetchJioChannelMap() {
+  if (jioChannelMap.size > 0 && Date.now() - jioChannelMapFetched < JIO_MAP_TTL_MS) {
+    return jioChannelMap;
+  }
+  try {
+    const res = await fetch("https://jjtvxweb.pages.dev/jstr4web.json", {
+      headers: { accept: "application/json" },
+    });
+    if (!res.ok) return jioChannelMap;
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : (data.result || []);
+    const map = new Map();
+    for (const item of list) {
+      if (item && item.id && item.name) {
+        const cleanName = item.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+        map.set(cleanName, String(item.id));
+        map.set(item.name.toLowerCase(), String(item.id));
+      }
+    }
+    jioChannelMap = map;
+    jioChannelMapFetched = Date.now();
+    console.log(`[Relay] Loaded ${map.size} JioTV channel mappings.`);
+  } catch (err) {
+    console.warn("[Relay] Failed to fetch JioTV channel map:", err.message);
+  }
+  return jioChannelMap;
+}
+
+const TATA_TO_JIO_ALIASES = {
+  "colors hd": "144",
+  "colors": "145",
+  "star plus hd": "1132",
+  "star plus": "148",
+  "zee tv hd": "167",
+  "zee tv": "168",
+  "sony sab hd": "471",
+  "sony sab": "154",
+  "sony max hd": "476",
+  "sony max": "3418",
+  "sony pix hd": "762",
+  "sony sports ten 1 hd": "162",
+  "sony sports ten 1": "162",
+  "sony sports ten 2 hd": "891",
+  "sony sports ten 3 hd": "892",
+  "aaj tak": "173",
+  "aaj tak hd": "481",
+  "india today": "203",
+  "ndtv 24x7": "255",
+  "ndtv india": "256",
+  "times now": "278",
+  "cnn news18": "194",
+  "star bharat hd": "870",
+  "star bharat": "871",
+  "star gold hd": "156",
+  "star gold": "157",
+  "star movies hd": "158",
+  "star sports 1 hd": "180",
+  "star sports 1 hindi hd": "487",
+  "star sports select 1 hd": "812",
+  "star sports select 2 hd": "813",
+  "star pravah hd": "824",
+  "zee cinema hd": "170",
+  "zee marathi hd": "826",
+  "zee bangla hd": "827",
+  "zee kannada hd": "830",
+  "zee telugu hd": "832",
+  "zee tamil hd": "831",
+  "zee cafe hd": "169",
+  "cartoon network": "539",
+  "pogo": "542",
+  "nickelodeon": "544",
+  "nick jr": "545",
+  "sonic": "546",
+  "discovery hd": "463",
+  "animal planet hd": "286",
+  "national geographic hd": "160",
+  "nat geo wild hd": "466",
+  "history tv18 hd": "146",
+  "tlc hd": "479",
+  "mtv hd": "477",
+};
+
+async function getJioIdForTataPlay(channelName) {
+  if (!channelName) return null;
+  const raw = channelName.toLowerCase().trim();
+  if (TATA_TO_JIO_ALIASES[raw]) return TATA_TO_JIO_ALIASES[raw];
+  const cl = raw.replace(/[^a-z0-9]/g, "");
+  if (TATA_TO_JIO_ALIASES[cl]) return TATA_TO_JIO_ALIASES[cl];
+
+  const map = await fetchJioChannelMap();
+  if (map.has(raw)) return map.get(raw);
+  if (map.has(cl)) return map.get(cl);
+
+  const simplified = raw.replace(/\b(hd|sd|channel|tv|india|in)\b/g, "").replace(/[^a-z0-9]/g, "");
+  if (simplified) {
+    for (const [key, id] of map.entries()) {
+      const kSimp = key.replace(/\b(hd|sd|channel|tv|india|in)\b/g, "").replace(/[^a-z0-9]/g, "");
+      if (kSimp === simplified) return id;
+    }
+  }
+  return null;
 }
 
 /** Rewrites an HLS playlist to route sub-playlists and media segments through the relay */
@@ -876,8 +984,38 @@ const server = http.createServer(async (req, res) => {
       }
       const tp = tataPlayCatalog.get(channelId);
       if (tp) {
+        // Tata Play CDN only provides Widevine DASH (.mpd).
+        // For HLS (.m3u8) requests, bridge to JioTV clearKey live stream:
+        if (format === "m3u8") {
+          const jioId = await getJioIdForTataPlay(tp.name);
+          if (jioId && handleJioTvDirect) {
+            console.log(`[Relay] Tata Play ${tp.name} (${channelId}) HLS bridging via JioTV channel ${jioId}`);
+            const jio = await resolveJioTvStream(jioId);
+            if (jio) {
+              const targetPath = `/jiotv-api/playlist.m3u8?u=${encodeURIComponent(jio.source)}${jio.keyParam}`;
+              const jioUrl = new URL(targetPath, relayOrigin);
+              const webReq = toWebRequest(req, jioUrl);
+              const webRes = await handleJioTvDirect(webReq, {}, jioUrl);
+              await forwardWebResponse(webRes, res);
+              return;
+            }
+          }
+        }
+
+        // For DASH (.mpd), try Tata Play subscriber CDN stream:
         upstreamUrl = await resolveTataPlayLiveStream(channelId);
         if (!upstreamUrl) {
+          // If unauthenticated or token-restricted, redirect to HLS JioTV bridge
+          const jioId = await getJioIdForTataPlay(tp.name);
+          if (jioId) {
+            res.writeHead(302, {
+              Location: `${relayOrigin}/live/${encodeURIComponent(channelId)}.m3u8`,
+              ...CORS_HEADERS,
+            });
+            res.end();
+            return;
+          }
+
           res.writeHead(401, { "Content-Type": "application/json", ...CORS_HEADERS });
           res.end(
             JSON.stringify({
@@ -901,9 +1039,8 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // If still not found, check JioTV resolver (NEVER use JioTV fallback for Tata Play channels!)
-    const isTataPlay = channelId.startsWith("tp-") || tataPlayCatalog.has(channelId);
-    if (!upstreamUrl && !isTataPlay && handleJioTvDirect) {
+    // If still not found, check JioTV resolver
+    if (!upstreamUrl && handleJioTvDirect) {
       const jio = await resolveJioTvStream(channelId);
       if (jio) {
         const targetPath = `/jiotv-api/playlist.m3u8?u=${encodeURIComponent(jio.source)}${jio.keyParam}`;

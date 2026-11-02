@@ -22,6 +22,7 @@
 import { streamProxyUrl } from "@/lib/stream-proxy";
 import { loadJioTvChannelDetail, buildJioTvPlaylistUrl } from "./jiotv";
 import rawTataPlayChannels from "@/data/tataplay-channels.json";
+import { getStoredTataPlayAuth } from "./tataplay";
 
 const API_BASE = "https://5093.dsp1.ott.kaltura.com/api_v3/service";
 const PARTNER_ID = "5093";
@@ -262,29 +263,30 @@ export async function resolveVzyStream(
   const token = customToken || getStoredVzyAuth()?.token;
   const hasDirectStream = Boolean(channel.hlsUrl || channel.dashUrl);
 
-  // 0. Tata Play channels: direct MPD and DASH manifests from tataplaysmart - NO JioTV fallback!
+  // 0. Tata Play channels: direct MPD/DASH when authenticated or FTA direct, with automated JioTV bridge fallback
   if (partnerLower === "tataplay") {
     const streamUrl = channel.dashUrl || channel.hlsUrl;
     if (!streamUrl) {
       throw new Error(`Tata Play channel ${channel.name} has no valid stream manifest`);
     }
 
-    const isDash = streamUrl.includes(".mpd") || !channel.hlsUrl;
+    const hasTataPlayAuth = Boolean(getStoredTataPlayAuth()?.loggedIn);
+    const isDirect = streamUrl.includes("delta") || streamUrl.includes("cable") || streamUrl.includes("jansetu") || streamUrl.includes("tvpunjab") || streamUrl.includes("5centscdn");
+    const isDash = (hasTataPlayAuth || isDirect) && (streamUrl.includes(".mpd") || !channel.hlsUrl);
     const relay = !ignoreRelay ? vzyRelayUrl() : null;
 
     if (relay) {
       return {
         url: `${relay}/live/${encodeURIComponent(channel.id)}.${isDash ? "mpd" : "m3u8"}`,
         format: isDash ? "dash" : "hls",
-        drm: channel.drm,
+        drm: (hasTataPlayAuth || isDirect) ? channel.drm : false,
         protectionData: (channel as unknown as { protectionData?: Record<string, unknown> }).protectionData,
       };
     }
 
-    const isDirect = streamUrl.includes("delta") || streamUrl.includes("cable") || streamUrl.includes("jansetu") || streamUrl.includes("tvpunjab") || streamUrl.includes("5centscdn");
-    if (!isDirect && (channel.drm || !channel.free)) {
+    if (!isDirect && (channel.drm || !channel.free) && !hasTataPlayAuth) {
       throw new Error(
-        `${channel.name} requires Tata Play subscriber authorization on Akamai CDN. Sign in with your registered mobile number or start the stream relay.`,
+        `${channel.name} requires Tata Play subscriber authorization or active stream relay. Sign in with your registered mobile number or start the stream relay.`,
       );
     }
 
