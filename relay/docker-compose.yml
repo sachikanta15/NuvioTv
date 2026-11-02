@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  nuvio-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nuvio-relay
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      - PORT=8090
+      - HOST=0.0.0.0
+    volumes:
+      - ./channels.json:/app/channels.json:ro
