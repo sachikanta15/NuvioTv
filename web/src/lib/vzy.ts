@@ -21,7 +21,6 @@
 
 import { streamProxyUrl } from "@/lib/stream-proxy";
 import { loadJioTvChannelDetail, buildJioTvPlaylistUrl } from "./jiotv";
-import rawTataPlayChannels from "@/data/tataplay-channels.json";
 import { getStoredTataPlayAuth } from "./tataplay";
 
 const API_BASE = "https://5093.dsp1.ott.kaltura.com/api_v3/service";
@@ -69,7 +68,6 @@ export interface VzyChannel {
 
 export const VZY_COLLECTIONS = [
   { id: "all", label: "All channels" },
-  { id: "tataplay", label: "Tata Play+" },
   { id: "free", label: "Free to watch" },
   { id: "jiohotstar", label: "JioHotstar" },
   { id: "sonyliv", label: "SonyLIV" },
@@ -102,7 +100,6 @@ export function matchesVzyCollection(
 ): boolean {
   if (collection === "all") return true;
   if (collection === "free") return channel.playable;
-  if (collection === "tataplay") return channel.partner?.toLowerCase() === "tataplay";
   if (collection === "jiohotstar") return channel.partner?.toLowerCase() === "jiohotstar";
   if (collection === "sonyliv") return channel.partner?.toLowerCase() === "sonyliv";
   const category = channel.category.toLowerCase();
@@ -797,17 +794,13 @@ async function withTimeout<T>(
   }
 }
 
-/** Loads every live channel from the VZY / Watcho directory and Tata Play Smart catalog. */
+/** Loads every live channel from the VZY / Watcho directory. */
 export async function loadVzyChannels(
   signal: AbortSignal,
 ): Promise<VzyChannel[]> {
   if (directoryCache && Date.now() - directoryCache.at < DIRECTORY_TTL_MS) {
     return directoryCache.channels;
   }
-
-  const tataPlayChannels = ((rawTataPlayChannels as unknown as VzyChannel[]) || []).map((c) => ({
-    ...c,
-  }));
 
   const kalturaChannels = await withTimeout(
     signal,
@@ -835,9 +828,7 @@ export async function loadVzyChannels(
     },
   ).catch(() => []);
 
-  const combined = [...kalturaChannels, ...tataPlayChannels];
-
-  combined.sort((a, b) => {
+  kalturaChannels.sort((a, b) => {
     // Prioritize playable channels first, then by LCN, then by name
     if (a.playable !== b.playable) {
       return a.playable ? -1 : 1;
@@ -847,6 +838,6 @@ export async function loadVzyChannels(
     return lcnOrder || a.name.localeCompare(b.name);
   });
 
-  directoryCache = { at: Date.now(), channels: combined };
-  return combined;
+  directoryCache = { at: Date.now(), channels: kalturaChannels };
+  return kalturaChannels;
 }

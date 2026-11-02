@@ -14,7 +14,6 @@ import {
   Search,
   Settings,
   Tv,
-  Tv2,
   UserCircle,
   X,
 } from "lucide-react";
@@ -29,7 +28,6 @@ const NAV_ITEMS = [
   { to: "/discover", label: "Discover", icon: Compass, end: false },
   { to: "/jiotv", label: "JioTV Live", icon: Tv, end: false },
   { to: "/vzy", label: "VZY Live", icon: Radio, end: false },
-  { to: "/tataplay", label: "TataPlay+", icon: Tv2, end: false },
   { to: "/search", label: "Search", icon: Search, end: false },
   { to: "/library", label: "Library", icon: Layers, end: false },
   { to: "/collections", label: "Collections", icon: FolderHeart, end: false },
