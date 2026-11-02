@@ -33,6 +33,7 @@ import {
   sanitizeMediaSegment,
 } from "../../worker/jiotv-direct.js";
 import type { KeyMaterial } from "../../worker/jiotv-direct.js";
+import { isAlreadyProxied, streamProxyUrl } from "./stream-proxy";
 
 const PREFIX = "/jiotv-api";
 
@@ -205,7 +206,12 @@ class JioTvDirectLoader implements Loader<LoaderContext> {
     const cached = this.mpdCache.get(href);
     if (cached && Date.now() - cached.at < MPD_CACHE_MS) return cached.text;
 
-    const response = await fetch(href, {
+    const targetUrl =
+      href.startsWith("http") && !isAlreadyProxied(href)
+        ? streamProxyUrl(href)
+        : href;
+
+    const response = await fetch(targetUrl, {
       headers: { accept: "*/*" },
       signal: this.signal(),
     });
@@ -328,7 +334,12 @@ class JioTvDirectLoader implements Loader<LoaderContext> {
     const target = url.searchParams.get("u");
     if (!target) throw new JioTvLoaderError({ code: 400, text: "missing-u" });
 
-    const response = await fetch(target, {
+    const targetUrl =
+      target.startsWith("http") && !isAlreadyProxied(target)
+        ? streamProxyUrl(target)
+        : target;
+
+    const response = await fetch(targetUrl, {
       headers: { accept: "*/*" },
       signal: this.signal(),
     });
@@ -377,7 +388,12 @@ class JioTvDirectLoader implements Loader<LoaderContext> {
     url: URL,
     callbacks: LoaderCallbacks<LoaderContext>,
   ) {
-    const response = await fetch(url, {
+    const rawUrl = url.toString();
+    const targetUrl =
+      rawUrl.startsWith("http") && !rawUrl.startsWith(this.origin) && !isAlreadyProxied(rawUrl)
+        ? streamProxyUrl(rawUrl)
+        : rawUrl;
+    const response = await fetch(targetUrl, {
       headers: this.context?.headers,
       signal: this.signal(),
     });

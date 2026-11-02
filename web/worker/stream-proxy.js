@@ -69,11 +69,31 @@ function rewriteHlsPlaylist(text, manifestUrl, origin, headersParam) {
 }
 
 function rewriteDashManifest(text, manifestUrl) {
-  if (!/<BaseURL[\s>]/i.test(text)) {
-    const base = manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
-    return text.replace(/(<MPD[\s\S]*?>)/i, `$1\n  <BaseURL>${base}</BaseURL>`);
+  const baseDir = manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
+
+  // 1. Rewrite any relative <BaseURL> tags to absolute URLs
+  let rewritten = text.replace(
+    /<BaseURL([\s\S]*?)>([\s\S]*?)<\/BaseURL>/gi,
+    (match, attrs, content) => {
+      const trimmed = content.trim();
+      if (!trimmed || /^https?:\/\//i.test(trimmed) || /^\/\//.test(trimmed)) {
+        return match;
+      }
+      try {
+        const absolute = new URL(trimmed, baseDir).toString();
+        return `<BaseURL${attrs}>${absolute}</BaseURL>`;
+      } catch {
+        return match;
+      }
+    },
+  );
+
+  // 2. If the manifest still does not contain any <BaseURL> at all, inject baseDir at the top
+  if (!/<BaseURL[\s>]/i.test(rewritten)) {
+    rewritten = rewritten.replace(/(<MPD[\s\S]*?>)/i, `$1\n  <BaseURL>${baseDir}</BaseURL>`);
   }
-  return text;
+
+  return rewritten;
 }
 
 export async function handleStreamProxy(request, env, url) {
@@ -117,8 +137,10 @@ export async function handleStreamProxy(request, env, url) {
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
   );
-  headers.set("Referer", `${parsed.origin}/`);
-  headers.set("Origin", parsed.origin);
+  if (!parsed.hostname.toLowerCase().includes("jio.com")) {
+    headers.set("Referer", `${parsed.origin}/`);
+    headers.set("Origin", parsed.origin);
+  }
 
   const encodedHeaders = url.searchParams.get("h");
   if (encodedHeaders) {

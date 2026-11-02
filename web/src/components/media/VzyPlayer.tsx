@@ -55,6 +55,9 @@ export function VzyPlayer({
   const [attempt, setAttempt] = useState(0);
 
   const relay = vzyRelayUrl();
+  const sourceModeRef = useRef<"relay" | "direct">("direct");
+  const fallbackInProgressRef = useRef(false);
+
   const {
     attach,
     error: playbackError,
@@ -75,6 +78,8 @@ export function VzyPlayer({
   useEffect(() => {
     let cancelled = false;
     playingRef.current = false;
+    fallbackInProgressRef.current = false;
+    sourceModeRef.current = relay ? "relay" : "direct";
     setLoading(true);
     setUnavailable(false);
     setResolutionError(null);
@@ -89,6 +94,32 @@ export function VzyPlayer({
       })
       .catch((err: unknown) => {
         if (cancelled) return;
+        // If relay failed to resolve, try direct resolution as fallback
+        if (sourceModeRef.current === "relay") {
+          console.warn(
+            "[VzyPlayer] Relay resolution failed, falling back to direct stream...",
+          );
+          sourceModeRef.current = "direct";
+          fallbackInProgressRef.current = true;
+          resolveVzyStream(channel, undefined, true)
+            .then((fallbackResolved) => {
+              if (cancelled) return;
+              setStreamUrl(fallbackResolved.url);
+              setProtectionData(fallbackResolved.protectionData);
+            })
+            .catch((fallbackErr: unknown) => {
+              if (cancelled) return;
+              const msg =
+                fallbackErr instanceof Error
+                  ? fallbackErr.message
+                  : "Stream currently unavailable in browser";
+              setResolutionError(msg);
+              setUnavailable(true);
+              setLoading(false);
+            });
+          return;
+        }
+
         const msg =
           err instanceof Error
             ? err.message
@@ -101,7 +132,7 @@ export function VzyPlayer({
     return () => {
       cancelled = true;
     };
-  }, [channel, attempt]);
+  }, [channel, attempt, relay]);
 
   // Attach resolved stream to video element
   useEffect(() => {
@@ -111,13 +142,79 @@ export function VzyPlayer({
     attach(video, streamUrl, protectionData);
   }, [streamUrl, protectionData, attach, attempt, unavailable]);
 
-  // Handle playback / CDN failures
+  // Handle playback / CDN failures with relay-to-direct fallback
   useEffect(() => {
     if (playbackError) {
+      if (sourceModeRef.current === "relay" && !fallbackInProgressRef.current) {
+        console.warn(
+          "[VzyPlayer] Playback error on relay, falling back to direct stream...",
+          playbackError,
+        );
+        sourceModeRef.current = "direct";
+        fallbackInProgressRef.current = true;
+        setLoading(true);
+        resolveVzyStream(channel, undefined, true)
+          .then((resolved) => {
+            setStreamUrl(resolved.url);
+            setProtectionData(resolved.protectionData);
+          })
+          .catch((err: unknown) => {
+            const msg =
+              err instanceof Error
+                ? err.message
+                : "Stream currently unavailable in browser";
+            setResolutionError(msg);
+            setUnavailable(true);
+            setLoading(false);
+          });
+        return;
+      }
       setUnavailable(true);
       setLoading(false);
     }
-  }, [playbackError]);
+  }, [playbackError, channel]);
+
+  // Stalled relay timer: if relay takes >8.5s without readyState >= 2, fallback to direct
+  useEffect(() => {
+    if (
+      !relay ||
+      sourceModeRef.current !== "relay" ||
+      unavailable ||
+      !streamUrl
+    ) {
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      if (
+        sourceModeRef.current === "relay" &&
+        !fallbackInProgressRef.current &&
+        !playingRef.current &&
+        (!videoRef.current || videoRef.current.readyState < 2)
+      ) {
+        console.warn(
+          "[VzyPlayer] Relay stream stalled (readyState < 2), falling back to direct stream...",
+        );
+        sourceModeRef.current = "direct";
+        fallbackInProgressRef.current = true;
+        setLoading(true);
+        resolveVzyStream(channel, undefined, true)
+          .then((resolved) => {
+            setStreamUrl(resolved.url);
+            setProtectionData(resolved.protectionData);
+          })
+          .catch((err: unknown) => {
+            const msg =
+              err instanceof Error
+                ? err.message
+                : "Stream currently unavailable in browser";
+            setResolutionError(msg);
+            setUnavailable(true);
+            setLoading(false);
+          });
+      }
+    }, 8500);
+    return () => clearTimeout(timer);
+  }, [streamUrl, relay, channel, unavailable]);
 
   const retry = useCallback(() => {
     setUnavailable(false);

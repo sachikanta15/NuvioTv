@@ -20,6 +20,7 @@
  */
 
 import { streamProxyUrl } from "@/lib/stream-proxy";
+import { loadJioTvChannelDetail, buildJioTvPlaylistUrl } from "./jiotv";
 
 const API_BASE = "https://5093.dsp1.ott.kaltura.com/api_v3/service";
 const PARTNER_ID = "5093";
@@ -216,16 +217,85 @@ export interface ResolvedVzyStream {
   protectionData?: Record<string, unknown>;
 }
 
+/**
+ * Mapping of VZY channel IDs that use unsupported DRM (e.g. Discovery Apple FairPlay / ExpressPlay)
+ * to their verified high-fidelity clearKey live streams.
+ */
+export const VZY_JIOTV_FALLBACK_MAP: Record<string, { id: string; name: string }> = {
+  "9487663": { id: "1132", name: "Star Plus HD" },
+  "8458377": { id: "1132", name: "Star Plus HD" },
+  "9450546": { id: "875", name: "Eurosport HD" },
+  "9450542": { id: "3434", name: "Investigation Discovery HD" },
+  "9450555": { id: "463", name: "Discovery HD" },
+  "9536122": { id: "286", name: "Animal Planet HD" },
+  "9450548": { id: "479", name: "TLC HD World India" },
+  "9450547": { id: "1079", name: "Cartoon Network HD+" },
+  "9450554": { id: "568", name: "Discovery Science" },
+  "9450551": { id: "541", name: "Discovery Turbo" },
+  "9450550": { id: "3430", name: "Discovery Tamil" },
+  "9450552": { id: "550", name: "Discovery Kids" },
+  "9450545": { id: "542", name: "Pogo" },
+  "9450543": { id: "193", name: "CNN International" },
+};
+
 export async function resolveVzyStream(
   channel: VzyChannel,
   customToken?: string,
+  ignoreRelay = false,
 ): Promise<ResolvedVzyStream> {
+  const partnerLower = (channel.partner || "").toLowerCase();
+  const drmTypeLower = (channel.drmType || "").toLowerCase();
+  const token = customToken || getStoredVzyAuth()?.token;
+  const hasDirectStream = Boolean(channel.hlsUrl || channel.dashUrl);
+
   // 1. Relay-first when a relay URL is configured (e.g. VITE_VZY_RELAY_URL or localStorage["nuvio.vzy.relayUrl"])
-  const relay = vzyRelayUrl();
-  if (relay) {
+  // Only route to relay if the channel actually has a direct stream in Kaltura OTT.
+  // Skip relay for Discovery channels because Discovery's upstream CDN uses Apple FairPlay DRM (skd://)
+  // and Intertrust ExpressPlay DRM which browsers/hls.js cannot decrypt natively.
+  const relay = !ignoreRelay ? vzyRelayUrl() : null;
+  if (relay && hasDirectStream && partnerLower !== "discovery") {
+    const isDash = !channel.hlsUrl && Boolean(channel.dashUrl);
+    let protectionData: Record<string, unknown> | undefined;
+
+    if (channel.dashUrl && (drmTypeLower === "nagra" || partnerLower === "vzy")) {
+      try {
+        const contentId = channel.externalId || channel.id;
+        const res = await fetch(vzyApiUrl("/content-auth-token"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            accountId: getStoredVzyAuth()?.phoneNumber || "anonymous",
+            contentId,
+            type: "1",
+            deviceUniqueId: "12345678-1234-1234-1234-123456789abc",
+            deviceId: "12345678-1234-1234-1234-123456789abc",
+            format: "widevine",
+            platform: "web",
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.licenseUrl && data?.token) {
+            protectionData = {
+              "com.widevine.alpha": {
+                serverURL: data.licenseUrl,
+                httpRequestHeaders: {
+                  "nv-authorizations": data.token,
+                },
+              },
+            };
+          }
+        }
+      } catch {
+        // Fallback without protectionData
+      }
+    }
+
     return {
-      url: `${relay}/live/${encodeURIComponent(channel.id)}.m3u8`,
-      format: "hls",
+      url: `${relay}/live/${encodeURIComponent(channel.id)}.${isDash ? "mpd" : "m3u8"}`,
+      format: isDash ? "dash" : "hls",
+      drm: Boolean(protectionData) || channel.drm,
+      protectionData,
     };
   }
 
@@ -238,8 +308,89 @@ export async function resolveVzyStream(
     };
   }
 
-  // 3. Nagra DASH DRM channels: generate license token via /content-auth-token for native Widevine EME in dash.js
-  if (channel.dashUrl) {
+  // 3. Partner channels (JioHotstar, SonyLIV, Discovery, Shemaroo, etc.)
+  const isPartner =
+    partnerLower === "jiohotstar" ||
+    partnerLower === "sonyliv" ||
+    partnerLower === "discovery" ||
+    partnerLower === "shemaroo_me" ||
+    drmTypeLower === "dynamicurl" ||
+    drmTypeLower === "jhslicense" ||
+    (drmTypeLower === "license" && partnerLower !== "vzy");
+
+  if (isPartner) {
+    // 1. Check if channel has an automated high-fidelity live stream fallback (e.g. Eurosport HD)
+    const jioFallback = VZY_JIOTV_FALLBACK_MAP[channel.id];
+    if (jioFallback) {
+      try {
+        const detail = await loadJioTvChannelDetail({
+          id: jioFallback.id,
+        });
+        const playlistUrl = buildJioTvPlaylistUrl(detail);
+        if (playlistUrl) {
+          return {
+            url: playlistUrl,
+            format: "hls",
+            drm: false,
+          };
+        }
+      } catch (err) {
+        console.warn(`[vzy] Fallback stream resolution failed for ${channel.name}:`, err);
+      }
+    }
+
+    let pid = channel.id;
+    if (channel.externalId) {
+      const parts = channel.externalId.split(partnerLower);
+      if (parts.length > 1 && parts[1].length > 1) {
+        pid = parts[1].replace(/^[_-]/, "");
+      } else if (partnerLower !== "discovery") {
+        pid = channel.externalId;
+      }
+    }
+
+    if (token) {
+      try {
+        const params = new URLSearchParams({
+          userId: getStoredVzyAuth()?.userId || getStoredVzyAuth()?.phoneNumber || "999999999",
+          pid,
+          contentPartner: partnerLower,
+          scheme: "widevine",
+          deviceType: "web",
+          deviceId: "123445",
+          isDrm: channel.drmType === "FreeDynamicUrl" ? "false" : "true",
+          isLinear: "true",
+        });
+        const res = await fetch(vzyApiUrl(`/stream?${params.toString()}`), {
+          headers: { Authorization: token },
+        });
+        const data = await res.json();
+        const streamUrl = data?.streamUrl || data?.data?.streamUrl || data?.url;
+        if (streamUrl) {
+          return {
+            url: vzyStreamProxyUrl(streamUrl),
+            format: streamUrl.includes(".mpd") ? "dash" : "hls",
+            drm: true,
+          };
+        }
+      } catch {
+        // Fall through to error
+      }
+    }
+
+    if (!token) {
+      throw new Error(
+        `Watcho / VZY account subscription required to unlock ${channel.name} (${channel.partner || "Partner"}). Click 'Unlock with VZY Account' below.`,
+      );
+    }
+
+    throw new Error(
+      `Active Watcho subscription required for ${channel.name} (${channel.partner || "Partner"}).`,
+    );
+  }
+
+  // 4. Nagra DASH DRM channels: generate license token via /content-auth-token for native Widevine EME in dash.js
+  if (channel.dashUrl && (drmTypeLower === "nagra" || partnerLower === "vzy")) {
     try {
       const contentId = channel.externalId || channel.id;
       const res = await fetch(vzyApiUrl("/content-auth-token"), {
@@ -281,59 +432,6 @@ export async function resolveVzyStream(
       format: "dash",
       drm: true,
     };
-  }
-
-  // 4. Partner channels (JioHotstar, SonyLIV, etc.)
-  const partnerLower = (channel.partner || "").toLowerCase();
-  const token = customToken || getStoredVzyAuth()?.token;
-
-  if (
-    partnerLower === "jiohotstar" ||
-    partnerLower === "sonyliv" ||
-    channel.drmType === "DynamicUrl" ||
-    channel.drmType === "JHSLicense"
-  ) {
-    let pid = channel.id;
-    if (channel.externalId) {
-      const parts = channel.externalId.split(partnerLower);
-      if (parts.length > 1 && parts[1].length > 1) {
-        pid = parts[1].replace(/^[_-]/, "");
-      } else {
-        pid = channel.externalId;
-      }
-    }
-
-    if (token) {
-      const params = new URLSearchParams({
-        userId: getStoredVzyAuth()?.userId || getStoredVzyAuth()?.phoneNumber || "999999999",
-        pid,
-        contentPartner: partnerLower,
-        scheme: "widevine",
-        deviceType: "web",
-        deviceId: "123445",
-        isDrm: channel.drmType === "FreeDynamicUrl" ? "false" : "true",
-        isLinear: "true",
-      });
-      const res = await fetch(vzyApiUrl(`/stream?${params.toString()}`), {
-        headers: { Authorization: token },
-      });
-      const data = await res.json();
-      const streamUrl = data?.streamUrl || data?.data?.streamUrl || data?.url;
-      if (streamUrl) {
-        return {
-          url: vzyStreamProxyUrl(streamUrl),
-          format: streamUrl.includes(".mpd") ? "dash" : "hls",
-          drm: true,
-        };
-      }
-      throw new Error(
-        data?.message ||
-          data?.error ||
-          "Watcho / VZY account subscription required for this channel.",
-      );
-    } else {
-      throw new Error("Watcho / VZY account required to unlock this partner stream.");
-    }
   }
 
   // 5. Fallback to static HLS if present
