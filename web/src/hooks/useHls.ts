@@ -38,11 +38,16 @@ export interface AudioTrack {
 interface UseHlsResult {
   levels: QualityLevel[];
   currentLevel: number;
+  activeLevel?: number;
   setLevel: (index: number) => void;
   audioTracks: AudioTrack[];
   currentAudioTrack: number;
   setAudioTrack: (index: number) => void;
-  attach: (video: HTMLVideoElement | null, src: string) => void;
+  attach: (
+    video: HTMLVideoElement | null,
+    src: string,
+    protectionData?: Record<string, unknown>,
+  ) => void;
   error: PlaybackError | null;
   isHls: boolean;
   /** True while the player is recovering from a failed startup. */
@@ -98,7 +103,14 @@ async function probeSource(url: string): Promise<"hls" | "html" | "media" | "unk
  * Attaches a media source to a video element, using hls.js for HLS manifests
  * (falls back to native HLS on Safari).
  */
-export function useHls(): UseHlsResult {
+interface UseHlsOptions {
+  /** Skip the generic network retry/proxy ladder (used for the relay path). */
+  skipNetworkRetries?: boolean;
+}
+
+export function useHls(options: UseHlsOptions = {}): UseHlsResult {
+  const skipRetriesRef = useRef(false);
+  skipRetriesRef.current = !!options.skipNetworkRetries;
   const instanceRef = useRef<HlsJs | null>(null);
   const dashRef = useRef<DashPlayer | null>(null);
   const dashTracksRef = useRef<DashTrack[]>([]);
@@ -108,10 +120,15 @@ export function useHls(): UseHlsResult {
   const mediaRecoveries = useRef(0);
   const probed = useRef(false);
   const proxyRetried = useRef(false);
-  const sourceRef = useRef<{ video: HTMLVideoElement | null; src: string } | null>(null);
+  const sourceRef = useRef<{
+    video: HTMLVideoElement | null;
+    src: string;
+    protectionData?: Record<string, unknown>;
+  } | null>(null);
 
   const [levels, setLevels] = useState<QualityLevel[]>([]);
   const [currentLevel, setCurrentLevel] = useState(-1);
+  const [activeLevel, setActiveLevel] = useState<number | undefined>(undefined);
   const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
   const [currentAudioTrack, setCurrentAudioTrack] = useState(-1);
   const [error, setError] = useState<PlaybackError | null>(null);
@@ -131,7 +148,12 @@ export function useHls(): UseHlsResult {
   }, []);
 
   const start = useCallback(
-    (video: HTMLVideoElement | null, src: string, token: number) => {
+    (
+      video: HTMLVideoElement | null,
+      src: string,
+      token: number,
+      protectionData?: Record<string, unknown>,
+    ) => {
       if (token !== generation.current) return;
       detach();
 
@@ -156,6 +178,10 @@ export function useHls(): UseHlsResult {
               },
             });
 
+            if (protectionData && typeof player.setProtectionData === "function") {
+              player.setProtectionData(protectionData);
+            }
+
             player.on(DASH_EVENTS.streamInitialized, () => {
               if (token !== generation.current) return;
               const bitrates = player.getBitrateInfoListFor("video") ?? [];
@@ -169,6 +195,10 @@ export function useHls(): UseHlsResult {
                 }))
                 .sort((a, b) => b.height - a.height);
               setLevels(parsed);
+              const currentBitrate = player.getQualityFor?.("video");
+              if (typeof currentBitrate === "number" && currentBitrate >= 0) {
+                setActiveLevel(currentBitrate);
+              }
 
               const tracks = player.getTracksFor("audio") ?? [];
               dashTracksRef.current = tracks;
@@ -191,6 +221,9 @@ export function useHls(): UseHlsResult {
             player.on(DASH_EVENTS.qualityChangeRendered, (payload) => {
               const data = payload as DashQualityChange;
               if (data?.mediaType && data.mediaType !== "video") return;
+              if (typeof data?.newQuality === "number") {
+                setActiveLevel(data.newQuality);
+              }
               setCurrentLevel(
                 player.isAutoSwitchQualityFor?.("video") ? -1 : data?.newQuality ?? -1,
               );
@@ -209,7 +242,13 @@ export function useHls(): UseHlsResult {
               );
             });
 
-            player.initialize(video, src, false);
+            player.on(DASH_EVENTS.playbackMetaDataLoaded, () => {
+              if (token !== generation.current) return;
+              setRecovering(false);
+              video.play().catch(() => undefined);
+            });
+
+            player.initialize(video, src, true);
           })
           .catch(() => {
             if (token !== generation.current) return;
@@ -266,6 +305,9 @@ export function useHls(): UseHlsResult {
             }))
             .sort((a, b) => b.height - a.height);
           setLevels(parsed);
+          if (typeof hls.currentLevel === "number" && hls.currentLevel >= 0) {
+            setActiveLevel(hls.currentLevel);
+          }
           const tracks: AudioTrack[] = (hls.audioTracks ?? []).map((track, index) => ({
             index,
             label: track.name || track.lang || `Audio ${index + 1}`,
@@ -280,12 +322,19 @@ export function useHls(): UseHlsResult {
         });
 
         hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
+          setActiveLevel(data.level);
           setCurrentLevel(hls.autoLevelEnabled ? -1 : data.level);
         });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (token !== generation.current) return;
           if (!data.fatal) return;
+
+          if (skipRetriesRef.current) {
+            setError(describeHlsError(data));
+            detach();
+            return;
+          }
 
           const jioDirect = isJioTvDirectSource(src);
 
@@ -322,7 +371,7 @@ export function useHls(): UseHlsResult {
               retryTimer.current = null;
               if (token !== generation.current) return;
               setRecovering(false);
-              start(video, src, token);
+              start(video, src, token, protectionData);
             }, RETRY_DELAY_MS);
             return;
           }
@@ -359,12 +408,17 @@ export function useHls(): UseHlsResult {
   );
 
   const attach = useCallback(
-    (video: HTMLVideoElement | null, src: string) => {
+    (
+      video: HTMLVideoElement | null,
+      src: string,
+      protectionData?: Record<string, unknown>,
+    ) => {
       generation.current += 1;
       const token = generation.current;
       detach();
       setLevels([]);
       setCurrentLevel(-1);
+      setActiveLevel(undefined);
       setAudioTracks([]);
       setCurrentAudioTrack(-1);
       setError(null);
@@ -373,9 +427,9 @@ export function useHls(): UseHlsResult {
       mediaRecoveries.current = 0;
       probed.current = false;
       proxyRetried.current = false;
-      sourceRef.current = { video, src };
+      sourceRef.current = { video, src, protectionData };
       setIsHls(isHlsUrl(src));
-      start(video, src, token);
+      start(video, src, token, protectionData);
     },
     [detach, start],
   );
@@ -383,11 +437,14 @@ export function useHls(): UseHlsResult {
   const retry = useCallback(() => {
     const current = sourceRef.current;
     if (!current) return;
-    attach(current.video, current.src);
+    attach(current.video, current.src, current.protectionData);
   }, [attach]);
 
   const setLevel = useCallback((index: number) => {
     setCurrentLevel(index);
+    if (index !== -1) {
+      setActiveLevel(index);
+    }
     if (instanceRef.current) instanceRef.current.currentLevel = index;
     if (dashRef.current) {
       const player = dashRef.current;
@@ -414,6 +471,7 @@ export function useHls(): UseHlsResult {
   return {
     levels,
     currentLevel,
+    activeLevel,
     setLevel,
     audioTracks,
     currentAudioTrack,

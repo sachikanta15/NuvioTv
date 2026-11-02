@@ -288,7 +288,6 @@ export async function handleJioTvAddon(request, env, url) {
     const id = parseChannelId(suffix.slice("/stream/channel/".length));
     const channels = await loadChannels();
     const channel = findChannel(channels, id);
-
     const relay = String(env?.JIOTV_ADDON_RELAY_URL ?? "")
       .trim()
       .replace(/\/+$/, "");
@@ -296,39 +295,35 @@ export async function handleJioTvAddon(request, env, url) {
       ? `${channel.name} · ${channel.category}`
       : `JioTV channel ${id}`;
 
+    const detail = await loadDetail(id);
+    const streams = [];
+
     if (relay) {
-      return json(200, {
-        streams: [
-          {
-            name: "JioTV",
-            title,
-            url: `${relay}/live/${encodeURIComponent(id)}.m3u8`,
-            behaviorHints: { notWebReady: false },
-          },
-        ],
+      streams.push({
+        name: "JioTV Relay",
+        title,
+        description: "Preferred: local relay on the home network.",
+        url: `${relay}/live/${encodeURIComponent(id)}.m3u8`,
+        behaviorHints: { notWebReady: false },
       });
     }
 
-    const detail = await loadDetail(id);
-    if (!detail) return json(200, { streams: [] });
+    if (detail) {
+      const blockedHost =
+        detail.host === "jiotvmblive.cdn.jio.com" ||
+        detail.host === "jiotvpllive.cdn.jio.com";
+      streams.push({
+        name: blockedHost ? "JioTV Cloudflare (blocked)" : "JioTV Cloudflare",
+        title,
+        description: blockedHost
+          ? "Fallback: Cloudflare Worker; this CDN host returns 451 without the relay."
+          : "Fallback: Cloudflare Worker.",
+        url: buildWorkerStreamUrl(url.origin, detail),
+        behaviorHints: { notWebReady: false },
+      });
+    }
 
-    const blockedHost =
-      detail.host === "jiotvmblive.cdn.jio.com" ||
-      detail.host === "jiotvpllive.cdn.jio.com";
-
-    return json(200, {
-      streams: [
-        {
-          name: blockedHost ? "JioTV (needs relay)" : "JioTV",
-          title,
-          description: blockedHost
-            ? "This channel's CDN host blocks the Worker egress. Configure a home relay to play it."
-            : "Live channel via the Nuvio server proxy.",
-          url: buildWorkerStreamUrl(url.origin, detail),
-          behaviorHints: { notWebReady: false },
-        },
-      ],
-    });
+    return json(200, { streams });
   }
 
   return json(404, { error: "not-found" });

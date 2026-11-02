@@ -68,6 +68,14 @@ function rewriteHlsPlaylist(text, manifestUrl, origin, headersParam) {
     .join("\n");
 }
 
+function rewriteDashManifest(text, manifestUrl) {
+  if (!/<BaseURL[\s>]/i.test(text)) {
+    const base = manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
+    return text.replace(/(<MPD[\s\S]*?>)/i, `$1\n  <BaseURL>${base}</BaseURL>`);
+  }
+  return text;
+}
+
 export async function handleStreamProxy(request, env, url) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders() });
@@ -143,12 +151,16 @@ export async function handleStreamProxy(request, env, url) {
   const looksLikePlaylist =
     /mpegurl|m3u8/i.test(contentType) ||
     /\.m3u8?(\?|$)/i.test(parsed.pathname + parsed.search);
+  const isDashManifest =
+    /dash\+xml/i.test(contentType) ||
+    /\.mpd(\?|$)/i.test(parsed.pathname + parsed.search);
 
   if (
     upstream.ok &&
     contentType &&
     !MEDIA_CONTENT_TYPE.test(contentType) &&
-    !looksLikePlaylist
+    !looksLikePlaylist &&
+    !isDashManifest
   ) {
     return jsonError(`Unsupported content type: ${contentType}`, 415);
   }
@@ -166,6 +178,18 @@ export async function handleStreamProxy(request, env, url) {
     const text = await upstream.text();
     if (upstream.ok && !/text\/html/i.test(contentType)) {
       const rewritten = rewriteHlsPlaylist(text, parsed.toString(), url.origin, encodedHeaders);
+      return new Response(rewritten, {
+        status: upstream.status,
+        headers: responseHeaders,
+      });
+    }
+    return new Response(text, { status: upstream.status, headers: responseHeaders });
+  }
+
+  if (isDashManifest) {
+    const text = await upstream.text();
+    if (upstream.ok && !/text\/html/i.test(contentType)) {
+      const rewritten = rewriteDashManifest(text, parsed.toString());
       return new Response(rewritten, {
         status: upstream.status,
         headers: responseHeaders,

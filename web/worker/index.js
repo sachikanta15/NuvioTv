@@ -31,11 +31,13 @@ import { handleNetMirror } from "./netmirror.js";
 import { handleJioTvDirect } from "./jiotv-direct.js";
 import { handleJioTvAddon } from "./jiotv-addon.js";
 import { handleStreamProxy } from "./stream-proxy.js";
+import { handleVzyProxy } from "./vzy-proxy.js";
 
 const NETMIRROR_PREFIX = "/netmirror-api";
 const JIOTV_PREFIX = "/jiotv-api";
 const JIOTV_ADDON_PREFIX = "/jiotv-addon";
 const STREAM_PROXY_PREFIX = "/stream-proxy";
+const VZY_PREFIX = "/vzy-api";
 
 export default {
   async fetch(request, env, ctx) {
@@ -67,6 +69,13 @@ export default {
       url.pathname.startsWith(`${STREAM_PROXY_PREFIX}/`)
     ) {
       return handleStreamProxy(request, env, url);
+    }
+
+    if (
+      url.pathname === VZY_PREFIX ||
+      url.pathname.startsWith(`${VZY_PREFIX}/`)
+    ) {
+      return handleVzyProxy(request, env, url);
     }
 
     if (env.ASSETS) return env.ASSETS.fetch(request);

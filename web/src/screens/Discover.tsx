@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Compass, MapPin, Sparkles, Tv } from "lucide-react";
+import { Compass, MapPin, Radio, Sparkles, Tv } from "lucide-react";
 import { Tabs } from "@/components/ui/Tabs";
 import { Chip } from "@/components/ui/Chip";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -138,20 +138,23 @@ export function DiscoverScreen() {
                     Live TV
                   </p>
                   <h2 className="mt-1 text-xl font-bold tracking-tight">
-                    Live channels from JioTV & your add-ons
+                    Live channels from JioTV, VZY & your add-ons
                   </h2>
                   <p className="mt-1 text-sm text-text-secondary">
                     {liveDescriptors.length > 0
                       ? `${liveDescriptors.length} live catalog${
                           liveDescriptors.length === 1 ? "" : "s"
-                        } from your add-ons, plus 900+ JioTV channels.`
-                      : "Open JioTV for Indian channels, or install a live TV add-on to see its catalogs here."}
+                        } from your add-ons, plus 900+ JioTV and 300+ VZY channels.`
+                      : "Open JioTV or VZY for live channels, or install a live TV add-on to see its catalogs here."}
                   </p>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button variant="primary" icon={<Tv size={16} />} onClick={() => navigate("/jiotv")}>
                   Open JioTV Live
+                </Button>
+                <Button variant="outline" icon={<Radio size={16} />} onClick={() => navigate("/vzy")}>
+                  Open VZY Live
                 </Button>
                 <Button variant="outline" onClick={() => setMode("addons")}>
                   Browse add-ons
@@ -169,6 +172,9 @@ export function DiscoverScreen() {
                 <div className="flex flex-wrap gap-3">
                   <Button variant="primary" onClick={() => navigate("/jiotv")}>
                     Open JioTV
+                  </Button>
+                  <Button variant="outline" onClick={() => navigate("/vzy")}>
+                    Open VZY
                   </Button>
                   <Button variant="outline" onClick={() => navigate("/addons")}>
                     Manage add-ons

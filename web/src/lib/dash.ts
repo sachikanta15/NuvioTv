@@ -37,6 +37,7 @@ export interface DashPlayer {
   on: (event: string, handler: (payload: unknown) => void) => void;
   off?: (event: string, handler: (payload: unknown) => void) => void;
   getBitrateInfoListFor: (type: string) => DashBitrateInfo[];
+  getQualityFor?: (type: string) => number;
   setQualityFor: (type: string, index: number) => void;
   setAutoSwitchQualityFor?: (type: string, value: boolean) => void;
   isAutoSwitchQualityFor?: (type: string) => boolean;
@@ -44,6 +45,7 @@ export interface DashPlayer {
   getCurrentTrackFor: (type: string) => DashTrack | null;
   setCurrentTrack: (track: DashTrack) => void;
   updateSettings: (settings: unknown) => void;
+  setProtectionData?: (data: Record<string, unknown>) => void;
 }
 
 interface DashModule {

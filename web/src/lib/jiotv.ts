@@ -46,6 +46,22 @@ export function jioTvBaseUrl(): string {
   return (configured || DEFAULT_JIOTV_API_URL).replace(/\/+$/, "");
 }
 
+/**
+ * Optional JioTV relay URL. When set (build-time `VITE_JIOTV_RELAY_URL` or
+ * `localStorage["nuvio.jiotv.relayUrl"]`), the player tries the relay first
+ * and falls back to the existing browser pipeline.
+ */
+export function jioTvRelayUrl(): string | null {
+  const configured = (import.meta.env.VITE_JIOTV_RELAY_URL as string | undefined)?.trim();
+  if (configured) return configured.replace(/\/+$/, "");
+  try {
+    const stored = globalThis.localStorage?.getItem("nuvio.jiotv.relayUrl")?.trim();
+    return stored ? stored.replace(/\/+$/, "") : null;
+  } catch {
+    return null;
+  }
+}
+
 export function mapJioTvChannels(
   records: JioTvRecord[],
   baseUrl: string,
@@ -358,14 +374,16 @@ async function withJioTvCdnToken(mpdUrl: string, channelId: string): Promise<str
 
 
 /**
- * Fetch one channel's resolver detail. The same-origin Worker route is tried
- * first (it avoids the resolver's browser CORS/latency); static hosts without
- * that route fall back to the upstream resolver directly.
+ * Fetch one channel's resolver detail. The browser resolves directly by
+ * default because the CDN token is issued to the requesting IP; a token
+ * obtained by the Worker can be bound to Cloudflare's egress and 403 in the
+ * browser. The Worker route is only a fallback for hosts without direct CORS.
  */
 async function fetchResolverDetail(
   base: string,
   channelId: string,
   signal: AbortSignal,
+  preferWorker = false,
 ): Promise<{ sources?: string[]; drm?: JioTvResolverDrm } | null> {
   const parse = async (response: Response) => {
     if (!response.ok) return null;
@@ -379,26 +397,39 @@ async function fetchResolverDetail(
     }
   };
 
-  try {
-    const viaWorker = await fetch(
-      `/jiotv-api/resolve?id=${encodeURIComponent(channelId)}`,
-      { signal, headers: { accept: "application/json" } },
-    );
-    const data = await parse(viaWorker);
-    if (data) return data;
-  } catch {
-    /* fall through to the upstream resolver */
+  const fetchDirect = async () => {
+    try {
+      const direct = await fetch(`${base}/api/public/channels/${channelId}`, {
+        signal,
+        headers: { accept: "application/json" },
+      });
+      return await parse(direct);
+    } catch {
+      return null;
+    }
+  };
+
+  const fetchViaWorker = async () => {
+    try {
+      const viaWorker = await fetch(
+        `/jiotv-api/resolve?id=${encodeURIComponent(channelId)}`,
+        { signal, headers: { accept: "application/json" } },
+      );
+      return await parse(viaWorker);
+    } catch {
+      return null;
+    }
+  };
+
+  if (!preferWorker) {
+    const direct = await fetchDirect();
+    if (direct) return direct;
   }
 
-  try {
-    const direct = await fetch(`${base}/api/public/channels/${channelId}`, {
-      signal,
-      headers: { accept: "application/json" },
-    });
-    return await parse(direct);
-  } catch {
-    return null;
-  }
+  const viaWorker = await fetchViaWorker();
+  if (viaWorker) return viaWorker;
+
+  return preferWorker ? fetchDirect() : null;
 }
 
 /**
@@ -410,13 +441,19 @@ async function fetchResolverDetail(
 export async function loadJioTvChannelDetail(
   channel: Pick<JioTvChannel, "id">,
   baseUrl = jioTvBaseUrl(),
+  options: { preferWorker?: boolean } = {},
 ): Promise<JioTvChannelDetail> {
   const base = baseUrl.replace(/\/+$/, "");
 
   const detailController = new AbortController();
   const detailTimer = setTimeout(() => detailController.abort(), 8000);
   const [detailResponse, channelMap] = await Promise.all([
-    fetchResolverDetail(base, channel.id, detailController.signal),
+    fetchResolverDetail(
+      base,
+      channel.id,
+      detailController.signal,
+      options.preferWorker,
+    ),
     // The fallback list is best-effort only — its absence must not break
     // channels the resolver already serves with token + key.
     loadJioTvChannelData().catch(() => null),

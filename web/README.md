@@ -36,7 +36,7 @@ No API keys or configuration are required — the app seeds **Cinemeta** (catalo
 | Add-ons | Install by URL, paste a Stremio collection JSON, curated registry, enable/disable, reorder, rename, refresh, per-catalog toggles |
 | Home | Three layouts (Modern hero + rows, Classic rows, Grid), India-first hero, continue-watching row or grid, lazy catalog rows |
 | Discover | India tab with curated rails and language filters, a dedicated **Live TV** tab (JioTV plus `tv`/`channel` add-on catalogs), dynamic type tabs including Live TV, genre chips and every catalog from every add-on |
-| Live TV | **JioTV Live** with its own channel directory and player |
+| Live TV | **JioTV Live** with its own channel directory and player; **VZY Live** (Watcho / Kaltura OTT) with 300+ channels and inline playback for free streams |
 | Search | Debounced multi-add-on search with movie/series filters, de-duplication, recent searches and Indian quick searches |
 | Detail | Logo/backdrop hero, compact/cinematic layouts, episode list with season picker, per-episode watched state, cast, companies, links, YouTube trailers, "more like this", start watch party |
 | Streams | Aggregated across add-ons, quality/HDR/codec/size badges, cached + browser-playable filters, debrid resolution, best-source auto-select |
