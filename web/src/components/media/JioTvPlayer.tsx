@@ -97,7 +97,7 @@ export function JioTvPlayer({
     }
   }, [channel, attempt, relay, loadDirect]);
 
-  // If the relay does not start, fall back to the browser pipeline.
+  // If the relay does not start within 3s, fall back to the browser pipeline.
   useEffect(() => {
     if (!relay || sourceModeRef.current !== "relay") return undefined;
     const timer = setTimeout(() => {
@@ -111,7 +111,7 @@ export function JioTvPlayer({
         relayFallbackStartedRef.current = true;
         void loadDirect();
       }
-    }, 10000);
+    }, 3000);
     return () => clearTimeout(timer);
   }, [channel, attempt, relay, loadDirect]);
 

@@ -212,7 +212,7 @@ export function VzyPlayer({
             setLoading(false);
           });
       }
-    }, 8500);
+    }, 3500);
     return () => clearTimeout(timer);
   }, [streamUrl, relay, channel, unavailable]);
 
