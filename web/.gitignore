@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.vite
+*.log
+
+# Wrangler
+.wrangler
+.dev.vars
+
+# Local environment (the publishable key is public, but keep the file local
+# so a fork does not ship someone else's backend configuration).
+.env
+.env.local
+.env.*.local

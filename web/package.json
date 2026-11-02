@@ -1,0 +1,46 @@
+{
+  "name": "nuvio-web",
+  "private": true,
+  "version": "1.2.0",
+  "description": "Nuvio TV web app — an India-first browser port of the Nuvio TV Android TV client.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc --noEmit",
+    "deploy": "npm run build && wrangler deploy",
+    "deploy:dry": "npm run build && wrangler deploy --dry-run",
+    "shoot": "node scripts/shoot.mjs",
+    "catalog:india": "node scripts/build-india-catalog.mjs",
+    "check:errors": "node scripts/check-errors.mjs",
+    "check:media-type": "node scripts/check-media-type.mjs",
+    "check:playback-errors": "node scripts/check-playback-errors.mjs",
+    "check:jiotv:direct": "node scripts/check-jiotv-direct.mjs",
+    "check:jiotv:live": "node scripts/smoke-jiotv-direct.mjs",
+    "mock:supabase": "node scripts/mock-supabase.mjs",
+    "check:auth": "node scripts/check-auth.mjs",
+    "check:auth:live": "node scripts/check-live-auth.mjs"
+  },
+  "dependencies": {
+    "dashjs": "^4.7.4",
+    "hls.js": "^1.5.15",
+    "lucide-react": "^0.446.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.2",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.8",
+    "wrangler": "^4.151.2"
+  }
+}
