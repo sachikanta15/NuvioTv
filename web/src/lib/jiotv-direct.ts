@@ -29,6 +29,8 @@ import {
   importKey,
   normalizeKey,
   parseMpd,
+  sanitizeInitSegment,
+  sanitizeMediaSegment,
 } from "../../worker/jiotv-direct.js";
 import type { KeyMaterial } from "../../worker/jiotv-direct.js";
 
@@ -59,8 +61,42 @@ function createStats(): LoaderStats {
 function readKeyMaterial(url: URL): KeyMaterial | null {
   const key = url.searchParams.get("k");
   if (key) return { key };
+
+  const keysParam = url.searchParams.get("keys");
+  if (keysParam) {
+    try {
+      const parsed = JSON.parse(keysParam) as Record<string, string>;
+      const keys: Record<string, string> = {};
+      for (const [kid, value] of Object.entries(parsed)) {
+        if (typeof value === "string") {
+          keys[kid.replace(/-/g, "").toLowerCase()] = value;
+        }
+      }
+      if (Object.keys(keys).length > 0) return { keys };
+    } catch {
+      /* not JSON; fall through to kid */
+    }
+  }
+
   const kid = url.searchParams.get("kid");
   return kid ? { kid } : null;
+}
+
+/** Pick the key matching a representation's KID (multi-key channels). */
+function keyForRepresentation(
+  rep: { kid?: string | null },
+  keyMaterial: KeyMaterial | null,
+  fallbackKid?: string | null,
+): string | null {
+  if (!keyMaterial) return null;
+  if ("key" in keyMaterial) return keyMaterial.key;
+  if ("keys" in keyMaterial) {
+    const kid = (rep.kid || fallbackKid || "")
+      .replace(/-/g, "")
+      .toLowerCase();
+    return kid ? keyMaterial.keys[kid] || null : null;
+  }
+  return null;
 }
 
 /** Format the response error of a failed CDN fetch like hls.js loaders do. */
@@ -108,11 +144,16 @@ class JioTvDirectLoader implements Loader<LoaderContext> {
     callbacks: LoaderCallbacks<LoaderContext>,
   ) {
     this.context = context;
-    this.controller = new AbortController();
+    const controller = new AbortController();
+    this.controller = controller;
     this.stats = createStats();
     this.stats.loading.start = performance.now();
     void this.run(context, callbacks).catch((error) => {
-      if (this.controller?.signal.aborted) return;
+      // hls.js routinely aborts fragment loads (level switches, playlist
+      // refreshes). `abort()` clears `this.controller`, so check the local
+      // controller — otherwise an expected abort is reported as a fatal
+      // network error.
+      if (controller.signal.aborted) return;
       const info =
         error instanceof JioTvLoaderError
           ? error.info
@@ -201,9 +242,10 @@ class JioTvDirectLoader implements Loader<LoaderContext> {
     // separate rendition group instead of a (bogus) video variant.
     const variantReps = videoReps.length > 0 ? videoReps : playlistReps;
 
-    const mediaUrl = (rep: { id: string }) => {
+    const mediaUrl = (rep: { id: string; kid?: string | null }) => {
       const params = new URLSearchParams({ u: mpdUrl, r: rep.id });
-      if (keyMaterial && "key" in keyMaterial) params.set("k", keyMaterial.key);
+      const key = keyForRepresentation(rep, keyMaterial, mpd.kid);
+      if (key) params.set("k", key);
       else if (keyMaterial && "kid" in keyMaterial)
         params.set("kid", keyMaterial.kid);
       return `${this.origin}${PREFIX}/media?${params.toString()}`;
@@ -258,7 +300,13 @@ class JioTvDirectLoader implements Loader<LoaderContext> {
     }
 
     rep.isLive = mpd.isLive;
-    const playlist = buildMediaPlaylist(this.origin, mpdUrl, rep, keyMaterial);
+    const key = keyForRepresentation(rep, keyMaterial, mpd.kid);
+    const effectiveKey = key
+      ? { key }
+      : keyMaterial && "kid" in keyMaterial
+        ? { kid: keyMaterial.kid }
+        : null;
+    const playlist = buildMediaPlaylist(this.origin, mpdUrl, rep, effectiveKey);
     if (!playlist) {
       throw new JioTvLoaderError({
         code: 422,
@@ -289,6 +337,13 @@ class JioTvDirectLoader implements Loader<LoaderContext> {
     }
     const bytes = new Uint8Array(await response.arrayBuffer());
 
+    // Init segments still declare `encv`/`enca` sample entries; clear the
+    // encryption metadata so hls.js sees `avc1`/`mp4a` tracks.
+    if (url.pathname.endsWith("/init")) {
+      this.deliverBytes(sanitizeInitSegment(bytes), callbacks);
+      return;
+    }
+
     // `k` carries the content key itself (the resolver's channel API exposes
     // it as a clearkey). `kid` maps to a key resolver template on the Worker,
     // which the browser does not have — segments stay encrypted and, without
@@ -296,6 +351,8 @@ class JioTvDirectLoader implements Loader<LoaderContext> {
     const key = await this.importContentKey(url.searchParams.get("k"));
     if (key) {
       await decryptSegment(bytes, key, globalThis.crypto);
+      this.deliverBytes(sanitizeMediaSegment(bytes), callbacks);
+      return;
     }
 
     this.deliverBytes(bytes, callbacks);

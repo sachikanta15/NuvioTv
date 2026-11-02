@@ -287,10 +287,14 @@ export function useHls(): UseHlsResult {
           if (token !== generation.current) return;
           if (!data.fatal) return;
 
+          const jioDirect = isJioTvDirectSource(src);
+
           // CORS-blocked manifests/segments work on the TV but fail in hls.js.
-          // Retry once through the same-origin media proxy.
+          // Retry once through the same-origin media proxy. JioTV's direct
+          // pipeline is already same-origin, so it never needs this retry.
           if (
             data.type === Hls.ErrorTypes.NETWORK_ERROR &&
+            !jioDirect &&
             !proxyRetried.current &&
             !isAlreadyProxied(src)
           ) {
@@ -324,7 +328,7 @@ export function useHls(): UseHlsResult {
           }
 
           void (async () => {
-            if (probed.current) {
+            if (jioDirect || probed.current) {
               setError(describeHlsError(data));
               detach();
               return;

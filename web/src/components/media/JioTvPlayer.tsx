@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink, Maximize2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  Maximize2,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
 import { useHls } from "@/hooks/useHls";
@@ -17,10 +25,12 @@ interface JioTvPlayerProps {
 /**
  * Full-screen JioTV player.
  *
- * Preferred path: the Worker at `/jiotv-api` decrypts the channel's
- * CENC-protected DASH stream into plain HLS, which hls.js plays directly.
- * When the channel exposes no decryptable source, or playback fails, the
- * JioTV embed player inside an iframe is used as a fallback.
+ * Playback runs through the shared CENC pipeline in
+ * `src/lib/jiotv-direct.ts`: the browser fetches the channel's DASH manifest
+ * and segments directly from the CDN and decrypts them with WebCrypto (the
+ * Worker route is used when server-side egress is allowed). There is no
+ * embed-iframe fallback; blocked or unsupported channels show an unavailable
+ * state with a provider link instead.
  */
 export function JioTvPlayer({
   channel,
@@ -35,37 +45,51 @@ export function JioTvPlayer({
   const [activity, setActivity] = useState(0);
   const [loading, setLoading] = useState(true);
   const [playlistUrl, setPlaylistUrl] = useState<string | null>(null);
-  const [embedOnly, setEmbedOnly] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const { attach, error: playbackError } = useHls();
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setPlaylistUrl(null);
-    setEmbedOnly(false);
+    setUnavailable(false);
     loadJioTvChannelDetail(channel)
       .then((detail) => {
         if (cancelled) return;
         const url = buildJioTvPlaylistUrl(detail);
         if (url) setPlaylistUrl(url);
-        else setEmbedOnly(true);
+        else {
+          setUnavailable(true);
+          setLoading(false);
+        }
       })
       .catch(() => {
-        if (!cancelled) setEmbedOnly(true);
+        if (!cancelled) {
+          setUnavailable(true);
+          setLoading(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [channel]);
+  }, [channel, attempt]);
 
   useEffect(() => {
     if (playlistUrl) attach(videoRef.current, playlistUrl);
   }, [playlistUrl, attach]);
 
-  // Direct playback failed after retries — fall back to the embed player.
+  // Direct playback failed (CDN blocked / key missing) — show the error state.
   useEffect(() => {
-    if (playbackError) setEmbedOnly(true);
+    if (playbackError) {
+      setUnavailable(true);
+      setLoading(false);
+    }
   }, [playbackError]);
+
+  const retry = useCallback(() => {
+    setAttempt((value) => value + 1);
+  }, []);
 
   const revealControls = useCallback(() => {
     setControlsVisible(true);
@@ -133,17 +157,47 @@ export function JioTvPlayer({
       onMouseMove={revealControls}
       onFocus={revealControls}
     >
-      {embedOnly ? (
-        <iframe
-          key={channel.embedUrl}
-          src={channel.embedUrl}
-          title={`${channel.name} live stream`}
-          allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-          allowFullScreen
-          referrerPolicy="origin"
-          className="h-full w-full border-0 bg-black"
-          onLoad={() => setLoading(false)}
-        />
+      {unavailable ? (
+        <div className="flex h-full w-full items-center justify-center bg-black px-6">
+          <div className="max-w-md space-y-4 text-center">
+            <AlertTriangle
+              size={36}
+              className="mx-auto text-[rgb(var(--nuvio-error))]"
+            />
+            <div className="space-y-2">
+              <h2 className="text-xl font-bold">Channel unavailable</h2>
+              <p className="text-sm text-white/70">
+                {playbackError?.message ??
+                  "This channel's stream could not be played in the browser."}
+              </p>
+              <p className="text-xs text-white/40">
+                JioTV's CDN blocks browser playback for some channels. Try
+                another channel, or open the provider page in a new tab.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button
+                size="sm"
+                variant="primary"
+                icon={<RefreshCw size={16} />}
+                onClick={retry}
+              >
+                Try again
+              </Button>
+              {channel.watchUrl && (
+                <a
+                  className="inline-flex h-9 items-center gap-1.5 rounded-full border border-white/15 bg-white/5 px-3 text-sm font-semibold text-text-primary transition-colors hover:border-white/30 hover:bg-white/10"
+                  href={channel.watchUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink size={16} />
+                  Open provider page
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
       ) : (
         <video
           ref={videoRef}
@@ -156,7 +210,7 @@ export function JioTvPlayer({
         />
       )}
 
-      {loading && (
+      {loading && !unavailable && (
         <div
           role="status"
           className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80"
@@ -204,8 +258,8 @@ export function JioTvPlayer({
 
         <div className="pointer-events-auto space-y-3">
           <p className="text-sm text-white/60">
-            {embedOnly
-              ? "Playing via the JioTV live embed player — use the controls inside the player for quality and audio language."
+            {unavailable
+              ? "This channel is blocked in the browser — use Previous / Next to try another channel."
               : "Playing directly from the JioTV live stream."}
           </p>
           <div className="flex flex-wrap items-center gap-2">

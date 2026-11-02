@@ -21,8 +21,6 @@ export interface JioTvChannel {
   name: string;
   category: string;
   logo: string | null;
-  /** Full-screen embed player for the channel. */
-  embedUrl: string;
   /** Standalone page for the channel (opens in a new tab). */
   watchUrl: string | null;
 }
@@ -62,7 +60,6 @@ export function mapJioTvChannels(
         name: record.name?.trim() || `Channel ${id}`,
         category: record.category?.trim() || "General",
         logo: record.logo?.trim() || null,
-        embedUrl: record.embed?.trim() || `${base}/embed/${id}`,
         watchUrl: record.watch?.trim() || `${base}/watch/${id}`,
       };
     })
@@ -142,7 +139,7 @@ export async function loadJioTvChannels(
   const abort = () => controller.abort();
   signal.addEventListener("abort", abort, { once: true });
   if (signal.aborted) controller.abort();
-  const timer = setTimeout(abort, 20000);
+  const timer = setTimeout(abort, 8000);
 
   try {
     const response = await fetch(`${base}/api/public/channels`, {
@@ -154,11 +151,38 @@ export async function loadJioTvChannels(
       | JioTvRecord[]
       | { channels?: JioTvRecord[] };
     const records = Array.isArray(data) ? data : (data.channels ?? []);
-    return mapJioTvChannels(records, base);
+    if (records.length > 0) return mapJioTvChannels(records, base);
+  } catch {
+    // The resolver is a single point of failure; fall through to the
+    // Pind channel list, which also carries stream URLs and clearkeys.
   } finally {
     clearTimeout(timer);
     signal.removeEventListener("abort", abort);
   }
+
+  return loadJioTvFallbackChannels(base, signal);
+}
+
+/** Directory fallback built from the Pind channel list. */
+async function loadJioTvFallbackChannels(
+  baseUrl: string,
+  signal: AbortSignal,
+): Promise<JioTvChannel[]> {
+  const response = await fetch(JIO_TV_CHANNEL_DATA_URL, {
+    signal,
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok) throw new Error("JioTV fallback directory unavailable");
+  const list = (await response.json()) as JioTvChannelData[];
+  const records: JioTvRecord[] = list
+    .filter((item) => item?.id !== undefined && item?.id !== null)
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      category: item.category,
+      logo: item.logo,
+    }));
+  return mapJioTvChannels(records, baseUrl);
 }
 
 /* --------------------------------------------------------------------------- */
@@ -167,8 +191,27 @@ export async function loadJioTvChannels(
 export interface JioTvChannelDetail {
   /** MPD manifest URLs, most-preferred first. */
   sources: string[];
-  /** AES-128 clearkey that decrypts the CENC segments, if advertised. */
+  /** KID (lowercase hex, no dashes) -> content key (hex/base64). */
+  keys: Record<string, string>;
+  /** First key, kept for callers that only handle one key. */
   drm: { keyId: string; key: string } | null;
+}
+
+/** Normalize a `default_KID` to lowercase bare hex. */
+function normalizeKid(value: string): string {
+  return value.replace(/-/g, "").toLowerCase();
+}
+
+/** Normalize a content key to lowercase bare hex when possible. */
+function normalizeKeyValue(value: string): string {
+  return value.trim().replace(/^0x/i, "").toLowerCase();
+}
+
+interface JioTvResolverDrm {
+  type?: string;
+  keyId?: string;
+  key?: string;
+  clearKeys?: Record<string, string>;
 }
 
 /* ---------------------------------------------------------------------------
@@ -202,6 +245,8 @@ let channelDataCache: { at: number; map: Map<string, JioTvChannelData> } | null 
 interface JioTvChannelData {
   id: string;
   name?: string;
+  category?: string;
+  logo?: string;
   url?: string;
   keyId?: string;
   key?: string;
@@ -313,6 +358,50 @@ async function withJioTvCdnToken(mpdUrl: string, channelId: string): Promise<str
 
 
 /**
+ * Fetch one channel's resolver detail. The same-origin Worker route is tried
+ * first (it avoids the resolver's browser CORS/latency); static hosts without
+ * that route fall back to the upstream resolver directly.
+ */
+async function fetchResolverDetail(
+  base: string,
+  channelId: string,
+  signal: AbortSignal,
+): Promise<{ sources?: string[]; drm?: JioTvResolverDrm } | null> {
+  const parse = async (response: Response) => {
+    if (!response.ok) return null;
+    try {
+      return (await response.json()) as {
+        sources?: string[];
+        drm?: JioTvResolverDrm;
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  try {
+    const viaWorker = await fetch(
+      `/jiotv-api/resolve?id=${encodeURIComponent(channelId)}`,
+      { signal, headers: { accept: "application/json" } },
+    );
+    const data = await parse(viaWorker);
+    if (data) return data;
+  } catch {
+    /* fall through to the upstream resolver */
+  }
+
+  try {
+    const direct = await fetch(`${base}/api/public/channels/${channelId}`, {
+      signal,
+      headers: { accept: "application/json" },
+    });
+    return await parse(direct);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Loads a single channel's stream metadata (MPD URL and clearkey). This is
  * what feeds the `/jiotv-api` direct-playback pipeline. The resolver's data
  * is merged with the channel-data list (per-channel clearkeys) and tagged
@@ -324,22 +413,14 @@ export async function loadJioTvChannelDetail(
 ): Promise<JioTvChannelDetail> {
   const base = baseUrl.replace(/\/+$/, "");
 
+  const detailController = new AbortController();
+  const detailTimer = setTimeout(() => detailController.abort(), 8000);
   const [detailResponse, channelMap] = await Promise.all([
-    fetch(`${base}/api/public/channels/${channel.id}`, {
-      headers: { accept: "application/json" },
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error("JioTV channel unavailable");
-        return (await response.json()) as {
-          sources?: string[];
-          drm?: { keyId?: string; key?: string };
-        };
-      })
-      .catch(() => null),
+    fetchResolverDetail(base, channel.id, detailController.signal),
     // The fallback list is best-effort only — its absence must not break
     // channels the resolver already serves with token + key.
     loadJioTvChannelData().catch(() => null),
-  ]);
+  ]).finally(() => clearTimeout(detailTimer));
   const fallback = channelMap?.get(String(channel.id)) ?? null;
 
   let source = detailResponse?.sources?.[0] || fallback?.url || null;
@@ -348,16 +429,30 @@ export async function loadJioTvChannelDetail(
   source = source.trim().replace("bpk-tv//", "bpk-tv/");
   source = await withJioTvCdnToken(source, channel.id);
 
-  let drm: JioTvChannelDetail["drm"] = null;
-  if (detailResponse?.drm?.keyId && detailResponse?.drm?.key) {
-    drm = { keyId: detailResponse.drm.keyId, key: detailResponse.drm.key };
-  } else if (fallback?.keyId && fallback?.key) {
-    drm = { keyId: fallback.keyId, key: fallback.key };
+  const keys: Record<string, string> = {};
+  const addKey = (keyId?: string | null, key?: string | null) => {
+    if (!keyId || !key) return;
+    const kid = normalizeKid(keyId);
+    if (kid) keys[kid] = normalizeKeyValue(key);
+  };
+
+  const resolverDrm = detailResponse?.drm;
+  // Most channels answer with `clearKeys` (a KID -> key map, one entry per
+  // AdaptationSet), not the legacy `keyId`/`key` pair.
+  if (resolverDrm?.clearKeys) {
+    for (const [kid, key] of Object.entries(resolverDrm.clearKeys)) {
+      addKey(kid, key);
+    }
   }
+  addKey(resolverDrm?.keyId, resolverDrm?.key);
+  addKey(fallback?.keyId, fallback?.key);
+
+  const firstKid = Object.keys(keys)[0];
+  const drm = firstKid ? { keyId: firstKid, key: keys[firstKid] } : null;
 
   // Prefer the fallback list's own alternate MPDs when the primary is gone.
   const sources = [source].filter((item): item is string => !!item);
-  return { sources, drm };
+  return { sources, keys, drm };
 }
 
 /**
@@ -370,6 +465,13 @@ export function buildJioTvPlaylistUrl(
   const mpd = detail.sources[0];
   if (!mpd) return null;
   const params = new URLSearchParams({ u: mpd });
-  if (detail.drm?.key) params.set("k", detail.drm.key);
+  const keyEntries = Object.entries(detail.keys);
+  if (keyEntries.length === 1) {
+    params.set("k", keyEntries[0][1]);
+  } else if (keyEntries.length > 1) {
+    params.set("keys", JSON.stringify(Object.fromEntries(keyEntries)));
+  } else if (detail.drm?.key) {
+    params.set("k", detail.drm.key);
+  }
   return `/jiotv-api/playlist.m3u8?${params.toString()}`;
 }

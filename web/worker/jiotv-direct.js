@@ -34,6 +34,11 @@
 
 const PREFIX = "/jiotv-api";
 
+/** Upstream JioTV directory/detail resolver (same one the web app uses). */
+const RESOLVER_BASE = "https://livetgtv.lovable.app";
+const RESOLVE_CACHE_TTL_MS = 10 * 60 * 1000;
+const resolveCache = new Map();
+
 /**
  * Number of segments kept in the live HLS window. Small enough that the
  * window is always fresh for a live edge, big enough to smooth buffering.
@@ -95,6 +100,186 @@ function* iterBoxes(view, start, end) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Clear init segments: strip CENC sample-entry encryption metadata.
+ *
+ * The decrypted media fragments are clear fMP4, but the DASH init segment
+ * still declares `encv`/`enca` sample entries with `sinf`/`pssh` boxes.
+ * hls.js only recognises `avc1`/`mp4a` entries, so it would parse the init
+ * and then report "Found no media" for every fragment. Rewriting the sample
+ * entries (and dropping the now-useless `sinf`/`pssh` boxes) makes the init
+ * a normal clear fMP4 init.
+ * ------------------------------------------------------------------------- */
+
+const PURE_CONTAINERS = new Set(["moov", "trak", "mdia", "minf", "stbl", "sinf", "schi"]);
+/** Bytes after the box header before a sample entry's child boxes. */
+const SAMPLE_ENTRY_HEADER = { encv: 78, enca: 28 };
+
+function childStartFor(type, payloadStart) {
+  if (PURE_CONTAINERS.has(type)) return payloadStart;
+  if (type === "stsd") return payloadStart + 8; // version/flags + entry_count
+  if (type === "encv" || type === "enca") {
+    return payloadStart + SAMPLE_ENTRY_HEADER[type];
+  }
+  return null;
+}
+
+function parseBoxTree(bytes, start, end) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const boxes = [];
+  for (const box of iterBoxes(view, start, end)) {
+    const childStart = childStartFor(box.type, box.payloadStart);
+    const children =
+      childStart !== null && childStart < box.boxEnd
+        ? parseBoxTree(bytes, childStart, box.boxEnd)
+        : null;
+    boxes.push({ ...box, children });
+  }
+  return boxes;
+}
+
+function boxTypeAt(view, offset) {
+  let type = "";
+  for (let i = 0; i < 4; i++) type += String.fromCharCode(view.getUint8(offset + i));
+  return type;
+}
+
+function sanitizeBoxTree(boxes, view) {
+  for (const box of boxes) {
+    if (box.type === "encv" || box.type === "enca") {
+      const sinf = box.children?.find((child) => child.type === "sinf");
+      const frma = sinf?.children?.find((child) => child.type === "frma");
+      if (frma && frma.boxEnd - frma.payloadStart >= 4) {
+        const original = boxTypeAt(view, frma.payloadStart);
+        if (/^[A-Za-z0-9]{4}$/.test(original)) box.originalType = original;
+      }
+      if (box.children) {
+        box.children = box.children.filter(
+          (child) => child.type !== "sinf" && child.type !== "pssh",
+        );
+      }
+    }
+    if (box.children) {
+      // Encryption metadata is useless once the samples are clear.
+      box.children = box.children.filter((child) => child.type !== "pssh");
+      sanitizeBoxTree(box.children, view);
+    }
+  }
+}
+
+function makeBox(type, payload) {
+  const size = 8 + payload.length;
+  const out = new Uint8Array(size);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, size);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i) & 0xff;
+  out.set(payload, 8);
+  return out;
+}
+
+function concatBytes(parts) {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+function serializeBoxTree(boxes, sourceBytes) {
+  const parts = [];
+  for (const box of boxes) {
+    if (box.type === "pssh" || box.type === "sinf") continue;
+
+    let payload;
+    if (box.type === "stsd") {
+      const fixed = sourceBytes.slice(box.payloadStart, box.payloadStart + 8);
+      payload = concatBytes([
+        fixed,
+        serializeBoxTree(box.children || [], sourceBytes),
+      ]);
+    } else if (box.type === "encv" || box.type === "enca") {
+      const fixedEnd = box.payloadStart + SAMPLE_ENTRY_HEADER[box.type];
+      const fixed = sourceBytes.slice(box.payloadStart, fixedEnd);
+      const rest = serializeBoxTree(box.children || [], sourceBytes);
+      payload = concatBytes([fixed, rest]);
+      parts.push(makeBox(box.originalType || box.type, payload));
+      continue;
+    } else if (PURE_CONTAINERS.has(box.type)) {
+      payload = serializeBoxTree(box.children || [], sourceBytes);
+    } else {
+      payload = sourceBytes.slice(box.payloadStart, box.boxEnd);
+    }
+    parts.push(makeBox(box.type, payload));
+  }
+  return concatBytes(parts);
+}
+
+/**
+ * Convert a CENC init segment into a clear fMP4 init segment:
+ * `encv`/`enca` sample entries become `avc1`/`mp4a`, and `sinf`/`pssh`
+ * encryption metadata is removed. Returns the input untouched when no
+ * encryption metadata is present.
+ */
+function sanitizeInitSegment(bytes) {
+  if (!bytes || bytes.byteLength < 16) return bytes;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const tree = parseBoxTree(bytes, 0, bytes.byteLength);
+  let changed = false;
+  const mark = (boxes) => {
+    for (const box of boxes) {
+      if (box.type === "encv" || box.type === "enca" || box.type === "pssh" || box.type === "sinf") {
+        changed = true;
+      }
+      if (box.children) mark(box.children);
+    }
+  };
+  mark(tree);
+  if (!changed) return bytes;
+
+  sanitizeBoxTree(tree, view);
+  return serializeBoxTree(tree, bytes);
+}
+
+/**
+ * Decrypted fragments keep their `senc`/`saiz`/`saio`/`sbgp`/`sgpd` boxes.
+ * MSE's MP4 parser treats a fragment with `senc` as still encrypted and
+ * rejects the append (`CHUNK_DEMUXER_ERROR_APPEND_FAILED`). Renaming those
+ * boxes to `free` in place makes the fragment a normal clear fMP4 fragment
+ * without changing any box size or the `trun` data offsets.
+ */
+const CENC_FRAGMENT_AUX_TYPES = new Set(["senc", "saiz", "saio", "sbgp", "sgpd"]);
+
+function sanitizeMediaSegment(bytes) {
+  if (!bytes || bytes.byteLength < 16) return bytes;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const copy = bytes.slice();
+  let changed = false;
+
+  const walk = (start, end) => {
+    let offset = start;
+    while (offset + 8 <= end) {
+      const box = boxHeader(view, offset, end);
+      if (!box) break;
+      if (CENC_FRAGMENT_AUX_TYPES.has(box.type)) {
+        copy[offset + 4] = 0x66; // f
+        copy[offset + 5] = 0x72; // r
+        copy[offset + 6] = 0x65; // e
+        copy[offset + 7] = 0x65; // e
+        changed = true;
+      } else if (box.type === "moof" || box.type === "traf") {
+        walk(box.payloadStart, box.boxEnd);
+      }
+      offset = box.boxEnd;
+    }
+  };
+
+  walk(0, copy.byteLength);
+  return changed ? copy : bytes;
+}
+
+/* ---------------------------------------------------------------------------
  * ISO-BMFF fragment parsing: locate `senc` and per-sample sizes.
  * ------------------------------------------------------------------------- */
 
@@ -107,20 +292,18 @@ function* iterBoxes(view, start, end) {
  * @returns {Array<{iv: Uint8Array, subsamples: Array<{clear:number, protected:number}>}>}
  */
 function parseSenc(view, start, end) {
-  // version(1) + flags(3); flags & 0x01 -> algorithm ID present, flags & 0x02
-  // -> per-sample IV followed by subsample entries (ISO/IEC 23001-7 §7.6).
+  // version(1) + flags(3); flags & 0x01 -> algorithm ID + per-sample IV size
+  // are present, flags & 0x02 -> subsample entries follow each IV
+  // (ISO/IEC 23001-7 §7.6). Every entry has an IV: full-sample encryption
+  // (audio) uses the same 8-byte default as subsample encryption (video).
   const flags = view.getUint32(start) & 0x00ffffff;
   const hasSubsamples = (flags & 0x02) !== 0;
-  let ivSize = 0;
+  let ivSize = 8; // CENC default per-sample IV size
   let offset = start + 4;
   if ((flags & 0x01) !== 0) {
-    offset += 3; // reserved
-    if (hasSubsamples) {
-      ivSize = view.getUint8(offset);
-      offset += 1;
-    }
-  } else if (hasSubsamples) {
-    ivSize = 8; // CENC default per-sample IV size
+    offset += 3; // algorithm ID
+    ivSize = view.getUint8(offset);
+    offset += 1;
   }
   const sampleCount = view.getUint32(offset);
   offset += 4;
@@ -170,6 +353,7 @@ function parseMoof(view, moofStart, moofEnd) {
         const sampleCount = view.getUint32(box.payloadStart + 4);
         let offset = box.payloadStart + 8;
         if ((flags & 0x01) !== 0) offset += 4; // data_offset
+        if ((flags & 0x04) !== 0) offset += 4; // first_sample_flags
         const sizes = [];
         for (let i = 0; i < sampleCount; i++) {
           if ((flags & 0x100) !== 0) offset += 4; // sample_duration
@@ -449,6 +633,10 @@ function parseMpd(mpdXml) {
     const firstRep = adaptBody.search(/<Representation\b/);
     const adaptHead = firstRep === -1 ? adaptBody : adaptBody.slice(0, firstRep);
 
+    // ContentProtection may sit at the AdaptationSet level; the KID is
+    // per-AdaptationSet when a channel ships multiple keys (audio vs video).
+    const adaptKid = extractDefaultKid(adaptBody);
+
     // Timeline entries, if this MPD uses <SegmentTimeline>.
     const timeline = [];
     const timelineTag = /<SegmentTimeline\b[^>]*>([\s\S]*?)<\/SegmentTimeline>/.exec(adaptHead);
@@ -481,9 +669,11 @@ function parseMpd(mpdXml) {
       if (!repTemplate) continue;
       const mimeType = rep.mimeType || adaptAttrs.mimeType || "";
       const contentType = rep.contentType || adaptAttrs.contentType || mimeType.split("/")[0] || "";
+      const repKid = repMatch[1] ? extractDefaultKid(repMatch[1]) : null;
       representations.push({
         id: rep.id,
         bandwidth: rep.bandwidth || "0",
+        kid: repKid || adaptKid || kid,
         timeline: repTimeline,
         template: repTemplate,
         isAudio: contentType === "audio",
@@ -560,9 +750,9 @@ function buildMediaPlaylist(origin, mpdUrl, rep, keyMaterial) {
     let cursor = 0;
     let number = -1;
     for (const s of rep.timeline) {
+      if (s.t !== undefined) cursor = Number(s.t);
       const count = Number(s.r !== undefined ? s.r : 0) + 1;
       for (let i = 0; i < count; i++) {
-        if (s.t !== undefined) cursor = Number(s.t);
         if (s.n !== undefined || number === -1) {
           number = Number(s.n !== undefined ? s.n : rep.template?.startNumber || 1);
         }
@@ -571,12 +761,33 @@ function buildMediaPlaylist(origin, mpdUrl, rep, keyMaterial) {
         number++;
       }
     }
-    const window = rep.isLive ? entries.slice(-LIVE_WINDOW_SEGMENTS) : entries;
+    // The last timeline entry is the segment still being produced; keep it
+    // out of the live window so hls.js never requests a partial fragment.
+    const liveWindow = entries.slice(-(LIVE_WINDOW_SEGMENTS + 1));
+    const window = rep.isLive
+      ? liveWindow.length > 1
+        ? liveWindow.slice(0, -1)
+        : liveWindow
+      : entries;
 
     let maxDuration = 1;
     for (const entry of window) {
       const duration = Number(entry.d || 0);
       if (duration > maxDuration) maxDuration = duration;
+    }
+
+    // A stable, monotonically increasing media sequence keeps hls.js from
+    // treating every playlist reload as a brand-new playlist (and aborting
+    // in-flight audio/video fragments).
+    const segmentTicks = Number(rep.template?.duration || maxDuration || 1);
+    const sequenceBase = Math.floor(
+      (Number(window[0]?.t || 0) - Number(rep.template?.presentationTimeOffset || 0)) /
+        segmentTicks,
+    );
+    lines.push(`#EXT-X-MEDIA-SEQUENCE:${Math.max(0, sequenceBase)}`);
+
+    for (const entry of window) {
+      const duration = Number(entry.d || 0);
       if (duration > 0) lines.push(`#EXTINF:${(duration / timescale).toFixed(3)},`);
       lines.push(segmentUrl(origin, mpdUrl, rep, keyMaterial, { Time: entry.t, Number: entry.n }));
     }
@@ -624,8 +835,44 @@ function hlsResponse(body) {
 function readKeyMaterial(url) {
   const key = url.searchParams.get("k");
   if (key) return { key };
+
+  const keysParam = url.searchParams.get("keys");
+  if (keysParam) {
+    try {
+      const parsed = JSON.parse(keysParam);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const keys = {};
+        for (const [kid, value] of Object.entries(parsed)) {
+          if (typeof value === "string") {
+            keys[String(kid).replace(/-/g, "").toLowerCase()] = value;
+          }
+        }
+        if (Object.keys(keys).length > 0) return { keys };
+      }
+    } catch {
+      /* not JSON; fall through to kid */
+    }
+  }
+
   const kid = url.searchParams.get("kid");
   return kid ? { kid } : null;
+}
+
+/**
+ * Pick the content key for one representation. Multi-key channel APIs expose
+ * a KID -> key map, so the playlists must carry the key matching that
+ * AdaptationSet's `default_KID`, not just the first key in the map.
+ */
+function keyForRepresentation(rep, keyMaterial, fallbackKid) {
+  if (!keyMaterial) return null;
+  if (keyMaterial.key) return keyMaterial.key;
+  if (keyMaterial.keys) {
+    const kid = String(rep.kid || fallbackKid || "")
+      .replace(/-/g, "")
+      .toLowerCase();
+    return kid ? keyMaterial.keys[kid] || null : null;
+  }
+  return null;
 }
 
 async function handleDebug(request, env, url) {
@@ -672,6 +919,46 @@ async function handleDebug(request, env, url) {
   return json(200, { attempts, egress });
 }
 
+async function handleResolve(request, env, url) {
+  const id = url.searchParams.get("id");
+  if (!id) return json(400, { error: "missing-id" });
+
+  const cached = resolveCache.get(id);
+  if (cached && Date.now() - cached.at < RESOLVE_CACHE_TTL_MS) {
+    return new Response(cached.body, {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "access-control-allow-origin": "*",
+      },
+    });
+  }
+
+  const base = (env.JIOTV_RESOLVER_URL || RESOLVER_BASE).replace(/\/+$/, "");
+  const target = `${base}/api/public/channels/${encodeURIComponent(id)}`;
+  try {
+    const response = await fetch(target, {
+      headers: { accept: "application/json" },
+    });
+    const body = await response.text();
+    if (response.ok) resolveCache.set(id, { at: Date.now(), body });
+    return new Response(body, {
+      status: response.status,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "access-control-allow-origin": "*",
+      },
+    });
+  } catch (error) {
+    return json(502, {
+      error: "resolver-unreachable",
+      message: errorMessage(error),
+    });
+  }
+}
+
 async function handlePlaylist(request, env, url) {
   const mpdUrl = url.searchParams.get("u");
   if (!mpdUrl) return json(400, { error: "missing-u" });
@@ -706,10 +993,13 @@ async function handlePlaylist(request, env, url) {
 
   const mediaParams = (rep) => {
     const params = new URLSearchParams({ u: mpdUrl, r: rep.id });
-    if (keyMaterial?.key) {
-      params.set("k", keyMaterial.key);
+    const key = keyForRepresentation(rep, keyMaterial, mpd.kid);
+    if (key) {
+      params.set("k", key);
     } else if (keyMaterial?.kid) {
       params.set("kid", keyMaterial.kid);
+    } else if (keyMaterial?.keys) {
+      params.set("keys", JSON.stringify(keyMaterial.keys));
     }
     return params;
   };
@@ -753,7 +1043,13 @@ async function handleMedia(request, env, url) {
   if (!rep) return json(404, { error: "representation-not-found" });
 
   rep.isLive = mpd.isLive;
-  const playlist = buildMediaPlaylist(url.origin, mpdUrl, rep, keyMaterial);
+  const key = keyForRepresentation(rep, keyMaterial, mpd.kid);
+  const effectiveKey = key
+    ? { key }
+    : keyMaterial?.kid
+      ? { kid: keyMaterial.kid }
+      : null;
+  const playlist = buildMediaPlaylist(url.origin, mpdUrl, rep, effectiveKey);
   if (!playlist) return json(422, { error: "representation-not-supported" });
   return hlsResponse(playlist);
 }
@@ -772,7 +1068,8 @@ async function handleInit(request, env, url) {
     return json(502, { error: "init-error", status: response.status });
   }
   const bytes = new Uint8Array(await response.arrayBuffer());
-  return new Response(bytes, {
+  const clear = sanitizeInitSegment(bytes);
+  return new Response(clear, {
     status: 200,
     headers: {
       "content-type": "video/mp4",
@@ -833,7 +1130,7 @@ async function handleSegment(request, env, url) {
     return json(500, { error: "decryption-failed", message: errorMessage(error) });
   }
 
-  return new Response(bytes, {
+  return new Response(sanitizeMediaSegment(bytes), {
     status: 200,
     headers: {
       "content-type": "video/mp4",
@@ -868,6 +1165,7 @@ export async function handleJioTvDirect(request, env, url) {
   if (suffix === "/media") return handleMedia(request, env, url);
   if (suffix === "/segment") return handleSegment(request, env, url);
   if (suffix === "/init") return handleInit(request, env, url);
+  if (suffix === "/resolve") return handleResolve(request, env, url);
   if (suffix === "/debug") return handleDebug(request, env, url);
 
   return json(404, { error: "not-found" });
@@ -884,4 +1182,6 @@ export {
   hexToBytes,
   buildMediaPlaylist,
   normalizeKey,
+  sanitizeInitSegment,
+  sanitizeMediaSegment,
 };

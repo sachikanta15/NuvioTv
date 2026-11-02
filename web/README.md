@@ -36,6 +36,7 @@ No API keys or configuration are required — the app seeds **Cinemeta** (catalo
 | Add-ons | Install by URL, paste a Stremio collection JSON, curated registry, enable/disable, reorder, rename, refresh, per-catalog toggles |
 | Home | Three layouts (Modern hero + rows, Classic rows, Grid), India-first hero, continue-watching row or grid, lazy catalog rows |
 | Discover | India tab with curated rails and language filters, a dedicated **Live TV** tab (JioTV plus `tv`/`channel` add-on catalogs), dynamic type tabs including Live TV, genre chips and every catalog from every add-on |
+| Live TV | **JioTV Live** with its own channel directory and player |
 | Search | Debounced multi-add-on search with movie/series filters, de-duplication, recent searches and Indian quick searches |
 | Detail | Logo/backdrop hero, compact/cinematic layouts, episode list with season picker, per-episode watched state, cast, companies, links, YouTube trailers, "more like this", start watch party |
 | Streams | Aggregated across add-ons, quality/HDR/codec/size badges, cached + browser-playable filters, debrid resolution, best-source auto-select |
@@ -62,8 +63,8 @@ web/src
 │   ├── player    PlayerOverlay (hls.js)
 │   └── ui        Button, IconButton, Modal, Tabs, Toggle, Slider, Select, Chip, Toasts, …
 ├── hooks         useHls, useCatalogs, usePartySync, useThemeSync, useMediaQuery, useDebounced, useFocusTrap
-├── lib           stremio (protocol client), india (curated catalogue), streams, debrid, trakt, meta, theme, format
-├── screens       Home, Discover, IndiaCollection, Search, Detail, Streams, Library, Collections, Addons, WatchParty, Tracking, Ambient, Settings, …
+├── lib           stremio (protocol client), india (curated catalogue), jiotv, streams, debrid, trakt, meta, theme, format
+├── screens       Home, Discover, IndiaCollection, JioTv, Search, Detail, Streams, Library, Collections, Addons, WatchParty, Tracking, Ambient, Settings, …
 ├── store         zustand stores (settings, addons, library, collections, profiles, player, party, tracking, debrid, search, ui)
 └── types         Stremio protocol + app domain models
 ```
@@ -200,6 +201,12 @@ npm run check:auth:live      # same checks against the real backend
 - **Container/codec limits remain.** The TV app's Media3 plays MKV, AVI, MPEG-TS, 10-bit HEVC,
   Dolby Vision and AC3/DTS audio; browsers often cannot. Those sources are labelled **TV only** and
   hidden by the "Playable in browser" filter. Prefer MP4, HLS or DASH sources.
+- **JioTV playback depends on the CDN host.** Channels served from
+  `jiotvmblive.cdn.jio.com` reject requests that carry an `Origin` header, so they cannot play in a
+  browser (the former embed player is blocked the same way). Channels on `jiotvpllive.cdn.jio.com`,
+  `times-ott-live.akamaized.net` and CloudFront hosts play directly. The player shows a clear
+  unavailable state with a provider link instead of falling back to an embed iframe, and the
+  channel directory falls back to the Pind list when the resolver is slow.
 - **The stream proxy is part of the Cloudflare Worker** (and the Vite dev server). Static hosts
   without `/stream-proxy` can only play sources that already send permissive CORS headers.
 - **Watch party sync is browser-local.** Tabs and windows that share the same browser stay in sync
@@ -220,6 +227,33 @@ The build is a static SPA — serve `dist/` with a history-API fallback:
 - **nginx:** `try_files $uri $uri/ /index.html;`
 - **Static hosts without rewrites:** switch `BrowserRouter` to `HashRouter` in `src/main.tsx`.
 
+### JioTV TV add-on
+
+The Worker also exposes a Stremio/Nuvio add-on for TV clients:
+
+| Route | Purpose |
+| --- | --- |
+| `/jiotv-addon/manifest.json` | Add-on manifest |
+| `/jiotv-addon/catalog/channel/jiotv.json` | Live channel catalog |
+| `/jiotv-addon/meta/channel/jiotv:<id>.json` | Channel metadata |
+| `/jiotv-addon/stream/channel/jiotv:<id>.json` | Playback URL |
+
+Install it in Nuvio TV → Addons → paste:
+
+```
+https://tv.sachikantaraul.dev/jiotv-addon/manifest.json
+```
+
+It appears as a **catalog row** (JioTV Live) on Home/Discover, not as a sidebar item.
+The web `/jiotv` screen is unchanged.
+
+By default streams point at the same `/jiotv-api` HLS pipeline, so they play only
+for CDN hosts the Worker can reach. Set the `JIOTV_ADDON_RELAY_URL` Worker
+variable to a home `jiotv_go` relay and the add-on will use
+`<relay>/live/<id>.m3u8` instead, which unlocks `jiotvmblive`/`jiotvpllive`
+channels without changing the catalog.
+
+
 ### Cloudflare Worker (this repo's own target)
 
 `wrangler.jsonc` deploys to the existing **Cloudflare Worker `android-tv-expo-web`**, which is
@@ -230,13 +264,15 @@ npm run deploy        # build + wrangler deploy
 npm run deploy:dry    # build + validate the bundle without publishing
 ```
 
-The Worker serves two things:
+The Worker serves these routes:
 
 | Path | Served by |
 | --- | --- |
 | `/` and all other paths | the `ASSETS` binding — this app's `dist/`, with `not_found_handling: single-page-application` so client-side routes resolve to `index.html` |
 | `/netmirror-api/*` | `worker/netmirror.js` — the NetMirror edge proxy (HLS/media/subtitles straight from the CDN, metadata and sign-in proxied to the always-on bridge) |
 | `/stream-proxy?url=…` | `worker/stream-proxy.js` — same-origin media proxy for add-on `proxyHeaders` and CORS-blocked HLS/MP4 streams; rewrites HLS playlists so segments and keys stay on the proxy |
+| `/jiotv-api/*` | `worker/jiotv-direct.js` — DASH→HLS conversion, CENC decryption, init/fragment sanitising and the resolver route |
+| `/jiotv-addon/*` | `worker/jiotv-addon.js` — Stremio/Nuvio add-on manifest, catalog, meta and stream routes |
 
 `worker/netmirror.js` is a byte-identical copy of the module that is already live on that Worker,
 so the proxy behaviour is unchanged by a web deploy. Its canonical source lives in the movie-web

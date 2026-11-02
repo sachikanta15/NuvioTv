@@ -104,7 +104,7 @@ export function DiscoverScreen() {
               {mode === "india"
                 ? "Curated Indian cinema, plus every catalog from your add-ons."
                 : mode === "live"
-                  ? "JioTV channels and live TV catalogs from your add-ons."
+                  ? "JioTV channels plus live TV catalogs from your add-ons."
                   : "Browse every catalog from your installed add-ons."}
             </p>
           </div>
@@ -145,7 +145,7 @@ export function DiscoverScreen() {
                       ? `${liveDescriptors.length} live catalog${
                           liveDescriptors.length === 1 ? "" : "s"
                         } from your add-ons, plus 900+ JioTV channels.`
-                      : "Open JioTV for 900+ Indian channels, or install a live TV add-on to see its catalogs here."}
+                      : "Open JioTV for Indian channels, or install a live TV add-on to see its catalogs here."}
                   </p>
                 </div>
               </div>

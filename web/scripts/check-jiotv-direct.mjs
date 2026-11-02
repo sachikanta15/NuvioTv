@@ -21,6 +21,8 @@ import {
   normalizeKey,
   parseMpd,
   parseSenc,
+  sanitizeInitSegment,
+  sanitizeMediaSegment,
 } from "../worker/jiotv-direct.js";
 
 /* ---------------------------------------------------------------------------
@@ -330,6 +332,95 @@ try {
     }
   }
   console.log("✓ content key normalization (bare hex / 0x-prefixed)");
+
+  {
+    // Audio tracks are full-sample encrypted: flags=0 still carries one
+    // 8-byte IV per sample (regression: these were dropped, so audio played
+    // back as undecrypted garbage).
+    const ivs = [
+      new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
+      new Uint8Array([9, 10, 11, 12, 13, 14, 15, 16]),
+    ];
+    const bytes = new Uint8Array(8 + ivs.length * 8);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, 0); // version=0, flags=0 (no subsamples)
+    view.setUint32(4, ivs.length);
+    ivs.forEach((iv, index) => bytes.set(iv, 8 + index * 8));
+    const wrapper = box("senc", bytes);
+    const entries = parseSenc(
+      new DataView(wrapper.buffer, wrapper.byteOffset, wrapper.byteLength),
+      8,
+      wrapper.length,
+    );
+    assert.equal(entries.length, 2, "full-sample senc must keep every sample");
+    assert.deepEqual(entries[0].iv, ivs[0]);
+    assert.deepEqual(entries[1].iv, ivs[1]);
+    assert.deepEqual(entries[0].subsamples, []);
+  }
+  console.log("✓ senc parsing (full-sample IVs)");
+
+  {
+    // A single <S r="2"> means three segments, each advancing by `d`.
+    const mpdXml = `<MPD type="static">
+      <AdaptationSet contentType="video">
+        <SegmentTemplate timescale="600" media="v-$Time$.m4s" initialization="v-init.mp4">
+          <SegmentTimeline><S t="1000" d="1200" r="2"/></SegmentTimeline>
+        </SegmentTemplate>
+        <Representation id="v1" bandwidth="1000" />
+      </AdaptationSet>
+    </MPD>`;
+    const mpd = parseMpd(mpdXml);
+    const rep = mpd.representations[0];
+    rep.isLive = mpd.isLive;
+    const playlist = buildMediaPlaylist(
+      "https://worker.example",
+      "https://cdn.example/index.mpd",
+      rep,
+      null,
+    );
+    const times = [...playlist.matchAll(/v-(\d+)\.m4s/g)].map((m) => m[1]);
+    assert.deepEqual(times, ["1000", "2200", "3400"]);
+  }
+  console.log("✓ SegmentTimeline repeat expansion");
+
+  {
+    // CENC init metadata must become a clear fMP4 init.
+    const frma = box("frma", new TextEncoder().encode("avc1"));
+    const sinf = box("sinf", concat(frma, box("schm", new Uint8Array(12))));
+    const encv = box("encv", concat(new Uint8Array(78), sinf));
+    const stsd = box("stsd", concat(new Uint8Array(8), encv));
+    const stbl = box("stbl", stsd);
+    const minf = box("minf", stbl);
+    const mdia = box("mdia", minf);
+    const trak = box("trak", mdia);
+    const moov = box("moov", concat(trak, box("pssh", new Uint8Array(16))));
+    const init = concat(box("ftyp", new Uint8Array(8)), moov);
+    const clean = sanitizeInitSegment(init);
+    const text = Buffer.from(clean).toString("latin1");
+    assert.ok(!text.includes("encv"), "encv must be rewritten");
+    assert.ok(!text.includes("sinf"), "sinf must be removed");
+    assert.ok(!text.includes("pssh"), "pssh must be removed");
+    assert.ok(text.includes("avc1"), "original avc1 sample entry must remain");
+  }
+  console.log("✓ init-segment encryption metadata is stripped");
+
+  {
+    // Decrypted fragments must not keep CENC auxiliary boxes.
+    const traf = box(
+      "traf",
+      concat(box("tfhd", new Uint8Array(8)), box("senc", new Uint8Array(8))),
+    );
+    const segment = concat(
+      box("moof", traf),
+      box("mdat", new Uint8Array(32)),
+    );
+    const clean = sanitizeMediaSegment(segment);
+    assert.equal(clean.length, segment.length, "sizes must not change");
+    const text = Buffer.from(clean).toString("latin1");
+    assert.ok(!text.includes("senc"), "senc must be renamed");
+    assert.ok(text.includes("free"), "aux boxes must become free");
+  }
+  console.log("✓ fragment CENC auxiliary boxes are neutralised");
 
   console.log("\nAll jiotv-direct checks passed.");
 } catch (error) {

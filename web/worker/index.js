@@ -29,15 +29,24 @@
 
 import { handleNetMirror } from "./netmirror.js";
 import { handleJioTvDirect } from "./jiotv-direct.js";
+import { handleJioTvAddon } from "./jiotv-addon.js";
 import { handleStreamProxy } from "./stream-proxy.js";
 
 const NETMIRROR_PREFIX = "/netmirror-api";
 const JIOTV_PREFIX = "/jiotv-api";
+const JIOTV_ADDON_PREFIX = "/jiotv-addon";
 const STREAM_PROXY_PREFIX = "/stream-proxy";
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (
+      url.pathname === JIOTV_ADDON_PREFIX ||
+      url.pathname.startsWith(`${JIOTV_ADDON_PREFIX}/`)
+    ) {
+      return handleJioTvAddon(request, env, url);
+    }
 
     if (
       url.pathname === JIOTV_PREFIX ||

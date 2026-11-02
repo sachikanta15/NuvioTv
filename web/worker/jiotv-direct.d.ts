@@ -16,6 +16,8 @@ export interface DashAttributes {
 export interface DashRepresentation {
   id: string;
   bandwidth: string;
+  /** `cenc:default_KID` for this representation (lowercased, dash-stripped). */
+  kid?: string | null;
   /** `<S>` entries of a SegmentTimeline. */
   timeline: DashAttributes[];
   /** The resolved `<SegmentTemplate>`. */
@@ -25,8 +27,14 @@ export interface DashRepresentation {
   isLive?: boolean;
 }
 
-/** Key material: `key` is the raw hex content key, `kid` needs resolving. */
-export type KeyMaterial = { key: string } | { kid: string };
+/**
+ * Key material: `key` is the raw hex content key, `kid` needs resolving, and
+ * `keys` is a KID -> key map for channels that rotate keys per AdaptationSet.
+ */
+export type KeyMaterial =
+  | { key: string }
+  | { kid: string }
+  | { keys: Record<string, string> };
 
 /** Parse DASH MPD XML into representations. */
 export function parseMpd(mpdXml: string): {
@@ -79,6 +87,12 @@ export function decryptSegment(
   cryptoRef?: Crypto,
 ): Promise<void>;
 
+/** Convert a CENC init segment into a clear fMP4 init (`encv` -> `avc1`). */
+export function sanitizeInitSegment(bytes: Uint8Array): Uint8Array;
+
+/** Rename CENC fragment auxiliary boxes (`senc`, `saiz`, ...) to `free`. */
+export function sanitizeMediaSegment(bytes: Uint8Array): Uint8Array;
+
 /** Build an HLS media playlist for one DASH representation. */
 export function buildMediaPlaylist(
   origin: string,
@@ -86,5 +100,12 @@ export function buildMediaPlaylist(
   rep: DashRepresentation,
   keyMaterial?: KeyMaterial | null,
 ): string | null;
+
+/** Route `/jiotv-api/*` requests (Worker and dev middleware). */
+export function handleJioTvDirect(
+  request: Request,
+  env: Record<string, unknown>,
+  url: URL,
+): Promise<Response>;
 
 
