@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Search, Tv2, X } from "lucide-react";
+import { KeyRound, Search, ShieldCheck, Tv2, X } from "lucide-react";
 import { VzyPlayer } from "@/components/media/VzyPlayer";
+import { TataPlayAuthModal } from "@/components/media/TataPlayAuthModal";
 import { Button } from "@/components/ui/Button";
 import { Chip } from "@/components/ui/Chip";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -9,10 +10,12 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { useDebounced } from "@/hooks/useDebounced";
 import {
   TATAPLAY_COLLECTIONS,
+  getStoredTataPlayAuth,
+  getTataPlayAuthStatus,
   loadTataPlayChannels,
   matchesTataPlayCollection,
 } from "@/lib/tataplay";
-import type { TataPlayChannel, TataPlayCollectionId } from "@/lib/tataplay";
+import type { TataPlayAuthData, TataPlayChannel, TataPlayCollectionId } from "@/lib/tataplay";
 
 const PAGE_SIZE = 48;
 
@@ -27,9 +30,17 @@ export function TataPlayScreen() {
   const [language, setLanguage] = useState("");
   const [visible, setVisible] = useState(PAGE_SIZE);
   const [selected, setSelected] = useState<TataPlayChannel | null>(null);
+  const [auth, setAuth] = useState<TataPlayAuthData | null>(getStoredTataPlayAuth());
+  const [authModalOpen, setAuthModalOpen] = useState(false);
   const lastChannelId = useRef<string | null>(null);
 
   const debouncedSearch = useDebounced(search, 250);
+
+  useEffect(() => {
+    getTataPlayAuthStatus().then((current) => {
+      if (current) setAuth(current);
+    });
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -130,6 +141,12 @@ export function TataPlayScreen() {
         />
       )}
 
+      <TataPlayAuthModal
+        isOpen={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        onSuccess={(newAuth) => setAuth(newAuth)}
+      />
+
       <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-soft">
@@ -148,6 +165,30 @@ export function TataPlayScreen() {
               Direct MPEG-DASH & HLS manifest streaming · Direct from tataplaysmart.com
             </p>
           </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {auth?.loggedIn ? (
+            <Button
+              size="sm"
+              variant="outline"
+              icon={<ShieldCheck size={16} className="text-emerald-400" />}
+              onClick={() => setAuthModalOpen(true)}
+              className="border-emerald-500/30 text-emerald-300 hover:border-emerald-500/50"
+            >
+              Tata Play: {auth.subscriberId ? `ID ${auth.subscriberId}` : "Connected"}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              icon={<KeyRound size={15} className="text-indigo-400" />}
+              onClick={() => setAuthModalOpen(true)}
+              className="border-indigo-500/30 text-indigo-300 hover:border-indigo-500/50"
+            >
+              Sign in with Tata Play
+            </Button>
+          )}
         </div>
       </header>
 
@@ -302,12 +343,18 @@ export function TataPlayScreen() {
                   <div className="flex items-center gap-1.5">
                     <span
                       className={
-                        channel.free || !channel.drm
-                          ? "block text-[10px] font-bold uppercase tracking-widest text-[rgb(var(--nuvio-error))]"
-                          : "block text-[10px] font-bold uppercase tracking-widest text-indigo-400"
+                        channel.directPlayable || channel.free || !channel.drm
+                          ? "block text-[10px] font-bold uppercase tracking-widest text-emerald-400"
+                          : auth?.loggedIn
+                            ? "block text-[10px] font-bold uppercase tracking-widest text-indigo-400"
+                            : "block text-[10px] font-bold uppercase tracking-widest text-purple-400"
                       }
                     >
-                      {channel.free || !channel.drm ? "Live · Direct" : "Tata Play"}
+                      {channel.directPlayable || channel.free || !channel.drm
+                        ? "Direct · Free"
+                        : auth?.loggedIn
+                          ? "Tata Play"
+                          : "Subscriber"}
                     </span>
                     <span className="text-[9px] font-medium text-purple-400/80 bg-purple-500/10 rounded px-1">
                       {channel.hlsUrl ? "HLS" : "DASH"}
@@ -347,3 +394,4 @@ export function TataPlayScreen() {
     </div>
   );
 }
+

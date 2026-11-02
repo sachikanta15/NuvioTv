@@ -15,6 +15,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -102,6 +103,194 @@ function loadTataPlayCatalog() {
     }
   }
   return new Map();
+}
+
+/** Tata Play Session Management and Akamai Token Resolver */
+const TATA_PLAY_SESSION_FILE = path.join(__dirname, "data/tataplay-session.json");
+const TATA_PLAY_SESSION_FILE_FALLBACK = path.join(__dirname, "tataplay-session.json");
+
+function getTataPlaySessionPath() {
+  const dir = path.join(__dirname, "data");
+  if (fs.existsSync(dir)) return TATA_PLAY_SESSION_FILE;
+  return TATA_PLAY_SESSION_FILE_FALLBACK;
+}
+
+function loadTataPlaySession() {
+  const p = getTataPlaySessionPath();
+  if (fs.existsSync(p)) {
+    try {
+      return JSON.parse(fs.readFileSync(p, "utf-8"));
+    } catch {}
+  }
+  return null;
+}
+
+function saveTataPlaySession(session) {
+  const p = getTataPlaySessionPath();
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(session, null, 2), "utf-8");
+  } catch (err) {
+    console.warn("[Relay] Failed saving Tata Play session:", err.message);
+  }
+}
+
+async function ensureTataPlayGuestDevice(session = null) {
+  let s = session || loadTataPlaySession() || {};
+  if (s.deviceId && s.anonymousId) return s;
+
+  const deviceId = "" + Math.floor(100 + Math.random() * 900) + Math.floor(Date.now() / 1000) + Math.floor(10 + Math.random() * 90);
+  try {
+    const res = await fetch("https://tb.tapi.videoready.tv/binge-mobile-services/pub/api/v1/user/guest/register", {
+      method: "POST",
+      headers: {
+        "accept": "application/json, text/plain, */*",
+        "authorization": "bearer undefined",
+        "referer": "https://www.tataplaybinge.com/",
+        "deviceid": deviceId,
+        "origin": "https://www.tataplaybinge.com",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+      }
+    });
+    const data = await res.json();
+    if (data?.data?.anonymousId) {
+      s = { ...s, deviceId, anonymousId: data.data.anonymousId };
+      saveTataPlaySession(s);
+      return s;
+    }
+  } catch (err) {
+    console.warn("[Relay] Failed to register guest device on Tata Play:", err.message);
+  }
+  return s;
+}
+
+function decryptTataPlayUrl(cipherTextB64, keyStr = "aesEncryptionKey") {
+  const key = Buffer.from(keyStr, "utf8");
+  const decipher = crypto.createDecipheriv("aes-128-ecb", key, null);
+  decipher.setAutoPadding(true);
+  let decrypted = decipher.update(cipherTextB64, "base64", "utf8");
+  decrypted += decipher.final("utf8");
+  return decrypted;
+}
+
+const tataPlayTokenCache = new Map();
+
+async function resolveTataPlayLiveStream(channelId) {
+  const tp = tataPlayCatalog.get(channelId);
+  if (!tp) return null;
+
+  const rawId = tp.id.replace(/^tp-/, "");
+  const defaultUrl = tp.dashUrl || tp.hlsUrl;
+
+  // Direct channels on delta or cable CDN do not require tokenization:
+  const isDirect = defaultUrl && (
+    defaultUrl.includes("delta") ||
+    defaultUrl.includes("cable") ||
+    defaultUrl.includes("jansetu") ||
+    defaultUrl.includes("tvpunjab") ||
+    defaultUrl.includes("5centscdn")
+  );
+  if (isDirect) {
+    return defaultUrl;
+  }
+
+  // Token cache check
+  const cached = tataPlayTokenCache.get(channelId);
+  if (cached && Date.now() < cached.exp - 60000) {
+    return cached.url;
+  }
+
+  const session = loadTataPlaySession();
+  if (!session?.loggedIn || !session?.userAuthenticateToken) {
+    return null;
+  }
+
+  const contentUrl = `https://tb.tapi.videoready.tv/content-detail/api/partner/cdn/player/details/chotiluli/${rawId}`;
+  try {
+    const res = await fetch(contentUrl, {
+      headers: {
+        "Authorization": `Bearer ${session.userAuthenticateToken}`,
+        "subscriberId": session.subscriberId || session.mobileNumber || "",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+      }
+    });
+
+    if (!res.ok) {
+      console.warn(`[Relay] Tata Play content-detail error for ${channelId}: status ${res.status}`);
+      return defaultUrl;
+    }
+
+    const json = await res.json();
+    const encryptedUrl = json?.data?.dashPlayreadyPlayUrl || json?.data?.dashWidewinePlayUrl;
+    if (!encryptedUrl) {
+      return defaultUrl;
+    }
+
+    let decryptedUrl = decryptTataPlayUrl(encryptedUrl, "aesEncryptionKey");
+    decryptedUrl = decryptedUrl.replace("bpaita", "bpaicatchupta").replace("manifest", "Manifest");
+
+    const headRes = await fetch(decryptedUrl, {
+      method: "GET",
+      redirect: "manual",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "Referer": "https://watch.tataplay.com/",
+        "Origin": "https://watch.tataplay.com",
+      }
+    });
+
+    let hdntl = null;
+    const cookie = headRes.headers.get("set-cookie");
+    if (cookie && cookie.includes("hdntl=")) {
+      const match = cookie.match(/hdntl=([^;]+)/);
+      if (match && match[1]) hdntl = match[1].trim();
+    }
+    if (!hdntl) {
+      const loc = headRes.headers.get("location");
+      if (loc && loc.includes("hdntl=")) {
+        const match = loc.match(/hdntl=([^&]+)/);
+        if (match && match[1]) hdntl = match[1].trim();
+      }
+    }
+
+    let finalUrl = decryptedUrl;
+    let expTime = Date.now() + 6 * 3600 * 1000;
+    if (hdntl) {
+      const clean = decryptedUrl.split("?")[0];
+      finalUrl = hdntl.startsWith("hdntl=") ? `${clean}?${hdntl}` : `${clean}?hdntl=${hdntl}`;
+      const expMatch = hdntl.match(/exp=(\d+)/);
+      if (expMatch && expMatch[1]) {
+        expTime = Number(expMatch[1]) * 1000;
+      }
+    }
+
+    tataPlayTokenCache.set(channelId, { url: finalUrl, exp: expTime });
+    return finalUrl;
+  } catch (err) {
+    console.warn(`[Relay] Failed resolving token for Tata Play ${channelId}:`, err.message);
+    return defaultUrl;
+  }
+}
+
+async function parseJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 1e6) {
+        req.destroy();
+        reject(new Error("Body too large"));
+      }
+    });
+    req.on("end", () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
 }
 
 /** Optional local channels.json override */
@@ -289,7 +478,12 @@ function rewriteDashManifest(text, manifestUrl) {
 /** Helper to construct upstream headers without leaking Watcho origin to Jio/Tata CDNs */
 function getUpstreamHeaders(targetUrl, clientHeaders = {}) {
   const isJio = targetUrl.toLowerCase().includes("jio.com");
-  const isTata = targetUrl.toLowerCase().includes("tatasky") || targetUrl.toLowerCase().includes("tataplay");
+  const isTata =
+    targetUrl.toLowerCase().includes("tatasky") ||
+    targetUrl.toLowerCase().includes("tataplay") ||
+    targetUrl.toLowerCase().includes("bpaita") ||
+    targetUrl.toLowerCase().includes("bpaicatchupta") ||
+    targetUrl.toLowerCase().includes("irdeto");
   return {
     "User-Agent":
       clientHeaders["user-agent"] ||
@@ -356,10 +550,155 @@ const server = http.createServer(async (req, res) => {
         version: "1.1.0",
         channelsCached: channelCatalog.size,
         port: PORT,
-        features: ["vzy", "jiotv", "stremio-addon"],
+        features: ["vzy", "jiotv", "tataplay", "stremio-addon"],
       }),
     );
     return;
+  }
+
+  // Tata Play Auth endpoints
+  if (reqUrl.pathname.startsWith("/tataplay/auth/")) {
+    if (reqUrl.pathname === "/tataplay/auth/status" && req.method === "GET") {
+      const s = loadTataPlaySession();
+      res.writeHead(200, { "Content-Type": "application/json", ...CORS_HEADERS });
+      res.end(
+        JSON.stringify({
+          loggedIn: Boolean(s?.loggedIn && s?.userAuthenticateToken),
+          mobileNumber: s?.mobileNumber || null,
+          subscriberId: s?.subscriberId || null,
+        }),
+      );
+      return;
+    }
+
+    if (reqUrl.pathname === "/tataplay/auth/logout" && req.method === "POST") {
+      saveTataPlaySession({});
+      tataPlayTokenCache.clear();
+      res.writeHead(200, { "Content-Type": "application/json", ...CORS_HEADERS });
+      res.end(JSON.stringify({ success: true, message: "Logged out successfully" }));
+      return;
+    }
+
+    if (reqUrl.pathname === "/tataplay/auth/otp/send" && req.method === "POST") {
+      try {
+        const body = await parseJsonBody(req);
+        const mobile = String(body.mobile || "").replace(/\D/g, "");
+        if (mobile.length < 10) {
+          res.writeHead(400, { "Content-Type": "application/json", ...CORS_HEADERS });
+          res.end(JSON.stringify({ error: "Invalid mobile number" }));
+          return;
+        }
+
+        const session = await ensureTataPlayGuestDevice();
+        const otpRes = await fetch("https://tb.tapi.videoready.tv/binge-mobile-services/pub/api/v1/user/authentication/generateOTP", {
+          method: "POST",
+          headers: {
+            "accept": "application/json, text/plain, */*",
+            "anonymousid": session.anonymousId,
+            "deviceid": session.deviceId,
+            "mobilenumber": mobile,
+            "newotpflow": "4DOTP",
+            "origin": "https://www.tataplaybinge.com",
+            "platform": "BINGE_ANYWHERE",
+            "referer": "https://www.tataplaybinge.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+          },
+        });
+        const data = await otpRes.json();
+        if (data.code === 0 || otpRes.ok) {
+          saveTataPlaySession({ ...session, mobileNumber: mobile });
+          res.writeHead(200, { "Content-Type": "application/json", ...CORS_HEADERS });
+          res.end(JSON.stringify({ success: true, message: data.message || "OTP generated successfully." }));
+        } else {
+          res.writeHead(400, { "Content-Type": "application/json", ...CORS_HEADERS });
+          res.end(JSON.stringify({ error: data.message || "Failed to generate OTP" }));
+        }
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json", ...CORS_HEADERS });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    if (reqUrl.pathname === "/tataplay/auth/otp/verify" && req.method === "POST") {
+      try {
+        const body = await parseJsonBody(req);
+        const mobile = String(body.mobile || "").replace(/\D/g, "");
+        const otp = String(body.otp || "").trim();
+        let session = await ensureTataPlayGuestDevice();
+
+        const validateRes = await fetch("https://tb.tapi.videoready.tv/binge-mobile-services/pub/api/v1/user/authentication/validateOTP", {
+          method: "POST",
+          headers: {
+            "accept": "application/json, text/plain, */*",
+            "anonymousid": session.anonymousId,
+            "content-type": "application/json",
+            "deviceid": session.deviceId,
+            "origin": "https://www.tataplaybinge.com",
+            "platform": "BINGE_ANYWHERE",
+            "referer": "https://www.tataplaybinge.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+          },
+          body: JSON.stringify({ mobileNumber: mobile, otp }),
+        });
+        const valData = await validateRes.json();
+        const userToken = valData?.data?.userAuthenticateToken;
+        const deviceToken = valData?.data?.deviceAuthenticateToken;
+
+        if (!userToken) {
+          res.writeHead(400, { "Content-Type": "application/json", ...CORS_HEADERS });
+          res.end(JSON.stringify({ error: valData.message || "Invalid OTP entered. Please try again." }));
+          return;
+        }
+
+        let subscriberId = mobile;
+        try {
+          const subRes = await fetch("https://tb.tapi.videoready.tv/binge-mobile-services/api/v4/subscriber/details", {
+            headers: {
+              "accept": "application/json, text/plain, */*",
+              "anonymousid": session.anonymousId,
+              "authorization": `bearer ${userToken}`,
+              "devicetype": "WEB",
+              "mobilenumber": mobile,
+              "origin": "https://www.tataplaybinge.com",
+              "platform": "BINGE_ANYWHERE",
+              "referer": "https://www.tataplaybinge.com/",
+              "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            },
+          });
+          if (subRes.ok) {
+            const subData = await subRes.json();
+            const acc = subData?.data?.accountDetails?.[0];
+            if (acc?.subscriberId) subscriberId = String(acc.subscriberId);
+          }
+        } catch {}
+
+        session = {
+          ...session,
+          mobileNumber: mobile,
+          subscriberId,
+          userAuthenticateToken: userToken,
+          deviceAuthenticateToken: deviceToken,
+          loggedIn: true,
+        };
+        saveTataPlaySession(session);
+        tataPlayTokenCache.clear();
+
+        res.writeHead(200, { "Content-Type": "application/json", ...CORS_HEADERS });
+        res.end(
+          JSON.stringify({
+            success: true,
+            subscriberId,
+            userAuthenticateToken: userToken,
+            message: "Logged in successfully",
+          }),
+        );
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json", ...CORS_HEADERS });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
   }
 
   // 2. JioTV Stremio Addon routes (/manifest.json, /catalog/..., /meta/..., /stream/...)
@@ -450,7 +789,17 @@ const server = http.createServer(async (req, res) => {
       }
       const tp = tataPlayCatalog.get(channelId);
       if (tp) {
-        upstreamUrl = format === "mpd" ? tp.dashUrl : tp.hlsUrl || tp.dashUrl;
+        upstreamUrl = await resolveTataPlayLiveStream(channelId);
+        if (!upstreamUrl) {
+          res.writeHead(401, { "Content-Type": "application/json", ...CORS_HEADERS });
+          res.end(
+            JSON.stringify({
+              error: "tataplay_auth_required",
+              message: `${tp.name} requires Tata Play subscriber authorization on Akamai CDN. Sign in with your registered mobile number in TataPlay+.`,
+            }),
+          );
+          return;
+        }
       }
     }
 

@@ -18,7 +18,9 @@ import { useHls } from "@/hooks/useHls";
 import { cn } from "@/lib/cn";
 import type { VzyChannel } from "@/lib/vzy";
 import { getStoredVzyAuth, resolveVzyStream, vzyRelayUrl } from "@/lib/vzy";
+import { getStoredTataPlayAuth } from "@/lib/tataplay";
 import { VzyAuthModal } from "./VzyAuthModal";
+import { TataPlayAuthModal } from "./TataPlayAuthModal";
 
 interface VzyPlayerProps {
   channel: VzyChannel;
@@ -73,6 +75,7 @@ export function VzyPlayer({
   });
 
   const hasAuth = Boolean(getStoredVzyAuth()?.token);
+  const hasTataPlayAuth = Boolean(getStoredTataPlayAuth()?.loggedIn);
 
   // Resolve stream dynamically (clear stream, Widevine DASH token, partner stream, or relay)
   useEffect(() => {
@@ -313,9 +316,11 @@ export function VzyPlayer({
                   "This channel's stream could not be loaded in the browser player."}
               </p>
               <p className="text-xs text-white/40">
-                {channel.partner
-                  ? `${channel.name} is powered by ${channel.partner}. Connect a Watcho/VZY account or try another channel.`
-                  : "Try again, use Previous / Next to switch channels, or open the channel on VZY."}
+                {channel.partner === "tataplay"
+                  ? `${channel.name} requires Tata Play subscriber authorization on Akamai CDN. Sign in with your registered mobile number to unlock.`
+                  : channel.partner
+                    ? `${channel.name} is powered by ${channel.partner}. Connect a Watcho/VZY account or try another channel.`
+                    : "Try again, use Previous / Next to switch channels, or open the channel on VZY."}
               </p>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-2">
@@ -333,7 +338,13 @@ export function VzyPlayer({
                 icon={<KeyRound size={15} />}
                 onClick={() => setAuthModalOpen(true)}
               >
-                {hasAuth ? "Switch Account" : "Unlock with VZY Account"}
+                {channel.partner === "tataplay"
+                  ? hasTataPlayAuth
+                    ? "Switch Tata Play Account"
+                    : "Sign in with Tata Play"
+                  : hasAuth
+                    ? "Switch Account"
+                    : "Unlock with VZY Account"}
               </Button>
               <Button
                 size="sm"
@@ -587,7 +598,13 @@ export function VzyPlayer({
               icon={<KeyRound size={15} />}
               onClick={() => setAuthModalOpen(true)}
             >
-              {hasAuth ? "Account" : "Sign In"}
+              {channel.partner === "tataplay"
+                ? hasTataPlayAuth
+                  ? "Tata Play ID"
+                  : "Sign In"
+                : hasAuth
+                  ? "Account"
+                  : "Sign In"}
             </Button>
             {channel.watchUrl && (
               <a
@@ -604,13 +621,23 @@ export function VzyPlayer({
         </div>
       </div>
 
-      <VzyAuthModal
-        isOpen={authModalOpen}
-        onClose={() => setAuthModalOpen(false)}
-        onSuccess={() => {
-          setAttempt((a) => a + 1);
-        }}
-      />
+      {channel.partner === "tataplay" ? (
+        <TataPlayAuthModal
+          isOpen={authModalOpen}
+          onClose={() => setAuthModalOpen(false)}
+          onSuccess={() => {
+            setAttempt((a) => a + 1);
+          }}
+        />
+      ) : (
+        <VzyAuthModal
+          isOpen={authModalOpen}
+          onClose={() => setAuthModalOpen(false)}
+          onSuccess={() => {
+            setAttempt((a) => a + 1);
+          }}
+        />
+      )}
     </div>
   );
 }
