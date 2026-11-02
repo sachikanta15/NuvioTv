@@ -652,6 +652,10 @@ const server = http.createServer(async (req, res) => {
         }
 
         let subscriberId = mobile;
+        let dthStatus = "";
+        let bingeSubscriberId = "";
+        let baId = null;
+
         try {
           const subRes = await fetch("https://tb.tapi.videoready.tv/binge-mobile-services/api/v4/subscriber/details", {
             headers: {
@@ -669,15 +673,98 @@ const server = http.createServer(async (req, res) => {
           if (subRes.ok) {
             const subData = await subRes.json();
             const acc = subData?.data?.accountDetails?.[0];
-            if (acc?.subscriberId) subscriberId = String(acc.subscriberId);
+            if (acc) {
+              if (acc.subscriberId) subscriberId = String(acc.subscriberId);
+              if (acc.dthStatus) dthStatus = String(acc.dthStatus);
+              if (acc.bingeSubscriberId) bingeSubscriberId = String(acc.bingeSubscriberId);
+              if (acc.baId) baId = acc.baId;
+            }
           }
         } catch {}
+
+        // Complete user session on Tata Play Binge
+        let finalUserToken = userToken;
+        let finalSubscriberId = subscriberId;
+
+        try {
+          let loginUrl = "https://tb.tapi.videoready.tv/binge-mobile-services/api/v3/create/new/user";
+          let loginBody = {
+            dthStatus: "Non DTH User",
+            subscriberId: mobile,
+            login: "OTP",
+            mobileNumber: mobile,
+            isPastBingeUser: false,
+            eulaChecked: true,
+            packageId: ""
+          };
+
+          if (dthStatus === "DTH Without Binge") {
+            loginUrl = "https://tb.tapi.videoready.tv/binge-mobile-services/api/v3/create/new/user";
+            loginBody = {
+              dthStatus: "DTH Without Binge",
+              subscriberId,
+              login: "OTP",
+              mobileNumber: mobile,
+              baId: null,
+              isPastBingeUser: false,
+              eulaChecked: true,
+              packageId: "",
+              referenceId: null
+            };
+          } else if (dthStatus) {
+            loginUrl = "https://tb.tapi.videoready.tv/binge-mobile-services/api/v3/update/exist/user";
+            loginBody = {
+              dthStatus,
+              subscriberId,
+              bingeSubscriberId,
+              baId,
+              login: "OTP",
+              mobileNumber: mobile,
+              payment_return_url: "https://www.tataplaybinge.com/subscription-transaction/status",
+              eulaChecked: true,
+              packageId: ""
+            };
+          }
+
+          const loginHeaders = {
+            "accept": "application/json, text/plain, */*",
+            "anonymousid": session.anonymousId,
+            "authorization": `bearer ${userToken}`,
+            "content-type": "application/json",
+            "device": "WEB",
+            "deviceid": session.deviceId,
+            "devicename": "Web",
+            "devicetoken": deviceToken,
+            "origin": "https://www.tataplaybinge.com",
+            "platform": "WEB",
+            "referer": "https://www.tataplaybinge.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+          };
+
+          const loginRes = await fetch(loginUrl, {
+            method: "POST",
+            headers: loginHeaders,
+            body: JSON.stringify(loginBody),
+          });
+
+          if (loginRes.ok) {
+            const loginData = await loginRes.json();
+            if (loginData?.data?.userAuthenticateToken) {
+              finalUserToken = loginData.data.userAuthenticateToken;
+            }
+            if (loginData?.data?.subscriberId) {
+              finalSubscriberId = String(loginData.data.subscriberId);
+            }
+          }
+        } catch (err) {
+          console.warn("[Relay] Tata Play create/update user warning:", err.message);
+        }
 
         session = {
           ...session,
           mobileNumber: mobile,
-          subscriberId,
-          userAuthenticateToken: userToken,
+          subscriberId: finalSubscriberId,
+          userAuthenticateToken: finalUserToken,
           deviceAuthenticateToken: deviceToken,
           loggedIn: true,
         };
