@@ -61,6 +61,9 @@ const JioTvScreen = lazy(() =>
 const VzyScreen = lazy(() =>
   import("@/screens/Vzy").then((module) => ({ default: module.VzyScreen })),
 );
+const TataPlayScreen = lazy(() =>
+  import("@/screens/TataPlay").then((module) => ({ default: module.TataPlayScreen })),
+);
 const NotFoundScreen = lazy(() =>
   import("@/screens/NotFound").then((module) => ({ default: module.NotFoundScreen })),
 );
@@ -137,6 +140,7 @@ export default function App() {
           <Route path="/india/:collectionId" element={<IndiaCollectionScreen />} />
           <Route path="/jiotv" element={<JioTvScreen />} />
           <Route path="/vzy" element={<VzyScreen />} />
+          <Route path="/tataplay" element={<TataPlayScreen />} />
           <Route path="/party" element={<WatchPartyScreen />} />
           <Route path="/tracking" element={<TrackingScreen />} />
           <Route path="/search" element={<SearchScreen />} />
