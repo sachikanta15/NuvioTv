@@ -330,6 +330,9 @@ export async function handleJioTvAddon(request, env, url) {
     const relay = String(env?.JIOTV_ADDON_RELAY_URL ?? "")
       .trim()
       .replace(/\/+$/, "");
+    const tunnel = String(env?.JIOTV_ADDON_TUNNEL_URL ?? "")
+      .trim()
+      .replace(/\/+$/, "");
     const title = channel
       ? `${channel.name} · ${channel.category}`
       : `JioTV channel ${id}`;
@@ -343,6 +346,18 @@ export async function handleJioTvAddon(request, env, url) {
         title,
         description: "Preferred: local relay on the home network.",
         url: `${relay}/live/${encodeURIComponent(id)}.m3u8`,
+        behaviorHints: { notWebReady: false },
+      });
+    }
+
+    // Optional remote entry: same home relay behind a Cloudflare Tunnel.
+    // Only advertised when JIOTV_ADDON_TUNNEL_URL is configured.
+    if (tunnel) {
+      streams.push({
+        name: "JioTV Tunnel",
+        title,
+        description: "Remote access via Cloudflare Tunnel (use away from home).",
+        url: `${tunnel}/live/${encodeURIComponent(id)}.m3u8`,
         behaviorHints: { notWebReady: false },
       });
     }
