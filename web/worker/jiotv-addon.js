@@ -23,6 +23,19 @@ const PIND_LIST_URL = "https://jjtvxweb.pages.dev/jstr4web.json";
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8_000;
 
+/** Source-data spelling fixes and duplicate categories collapsed onto one value. */
+const CATEGORY_ALIASES = new Map([
+  ["malyalam", "Malayalam"],
+  ["live sports", "Sports"],
+  ["unknown", "Other"],
+  ["", "Other"],
+]);
+
+function normalizeCategory(raw) {
+  const value = String(raw ?? "").trim();
+  return CATEGORY_ALIASES.get(value.toLowerCase()) ?? (value || "Other");
+}
+
 const channelCache = new Map();
 const detailCache = new Map();
 let pindCache = null;
@@ -104,7 +117,7 @@ async function loadChannels() {
     .map((item) => ({
       id: String(item.id),
       name: String(item.name || item.channel_name || `Channel ${item.id}`).trim(),
-      category: String(item.category || "General").trim(),
+      category: normalizeCategory(item.category || item.channel_group),
       logo: item.logo || item.logoUrl || null,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -129,6 +142,19 @@ function metaFor(channel) {
     genres: [channel.category],
     releaseInfo: "Live",
   };
+}
+
+/** Every category present in the catalog, so the app can render real genres. */
+function catalogGenres(channels) {
+  const genres = new Set();
+  for (const channel of channels) {
+    if (channel.category) genres.add(channel.category);
+  }
+  return [...genres].sort((a, b) => {
+    if (a === "Other") return 1;
+    if (b === "Other") return -1;
+    return a.localeCompare(b);
+  });
 }
 
 function parseChannelId(raw) {
@@ -211,6 +237,7 @@ function catalogExtra(url) {
 
   return {
     search: (params.get("search") || "").trim().toLowerCase(),
+    genre: (params.get("genre") || "").trim(),
     skip: Number(params.get("skip") || 0) || 0,
   };
 }
@@ -230,9 +257,11 @@ export async function handleJioTvAddon(request, env, url) {
   }
 
   if (suffix === "/manifest.json") {
+    const channels = await loadChannels();
+    const genres = catalogGenres(channels);
     return json(200, {
       id: "com.nuvio.jiotv",
-      version: "1.0.0",
+      version: "1.1.0",
       name: "JioTV",
       description: "Live JioTV channels",
       logo: `${url.origin}/favicon.svg`,
@@ -247,8 +276,10 @@ export async function handleJioTvAddon(request, env, url) {
           type: "channel",
           id: "jiotv",
           name: "JioTV Live",
+          genres,
           showInHome: true,
           extra: [
+            { name: "genre", options: genres, isRequired: false },
             { name: "search", isRequired: false },
             { name: "skip", isRequired: false },
           ],
@@ -260,14 +291,22 @@ export async function handleJioTvAddon(request, env, url) {
 
   if (suffix.startsWith("/catalog/channel/jiotv")) {
     const channels = await loadChannels();
-    const { search, skip } = catalogExtra(url);
-    const filtered = search
-      ? channels.filter(
-          (channel) =>
-            channel.name.toLowerCase().includes(search) ||
-            channel.category.toLowerCase().includes(search),
-        )
-      : channels;
+    const { search, genre, skip } = catalogExtra(url);
+    const genreKey = genre.toLowerCase();
+    const hasGenre = genreKey !== "" && genreKey !== "default" && genreKey !== "all";
+
+    let filtered = channels;
+    if (hasGenre) {
+      filtered = filtered.filter((channel) => channel.category.toLowerCase() === genreKey);
+    }
+    if (search) {
+      filtered = filtered.filter(
+        (channel) =>
+          channel.name.toLowerCase().includes(search) ||
+          channel.category.toLowerCase().includes(search),
+      );
+    }
+
     const page = skip > 0 ? filtered.slice(skip) : filtered;
     return json(
       200,
