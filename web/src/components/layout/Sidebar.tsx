@@ -10,7 +10,6 @@ import {
   PanelLeftOpen,
   PartyPopper,
   Puzzle,
-  Radio,
   Search,
   Settings,
   Tv,
@@ -26,8 +25,7 @@ import { initials } from "@/lib/format";
 const NAV_ITEMS = [
   { to: "/", label: "Home", icon: Home, end: true },
   { to: "/discover", label: "Discover", icon: Compass, end: false },
-  { to: "/jiotv", label: "JioTV Live", icon: Tv, end: false },
-  { to: "/vzy", label: "VZY Live", icon: Radio, end: false },
+  { to: "/jiotv", label: "Live TV", icon: Tv, end: false },
   { to: "/search", label: "Search", icon: Search, end: false },
   { to: "/library", label: "Library", icon: Layers, end: false },
   { to: "/collections", label: "Collections", icon: FolderHeart, end: false },

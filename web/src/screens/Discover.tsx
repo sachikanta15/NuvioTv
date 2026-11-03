@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Compass, MapPin, Radio, Sparkles, Tv } from "lucide-react";
+import { Compass, MapPin, Sparkles, Tv } from "lucide-react";
 import { Tabs } from "@/components/ui/Tabs";
 import { Chip } from "@/components/ui/Chip";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -151,10 +151,7 @@ export function DiscoverScreen() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button variant="primary" icon={<Tv size={16} />} onClick={() => navigate("/jiotv")}>
-                  Open JioTV Live
-                </Button>
-                <Button variant="outline" icon={<Radio size={16} />} onClick={() => navigate("/vzy")}>
-                  Open VZY Live
+                  Open Live TV
                 </Button>
                 <Button variant="outline" onClick={() => setMode("addons")}>
                   Browse add-ons
@@ -171,10 +168,7 @@ export function DiscoverScreen() {
               action={
                 <div className="flex flex-wrap gap-3">
                   <Button variant="primary" onClick={() => navigate("/jiotv")}>
-                    Open JioTV
-                  </Button>
-                  <Button variant="outline" onClick={() => navigate("/vzy")}>
-                    Open VZY
+                    Open Live TV
                   </Button>
                   <Button variant="outline" onClick={() => navigate("/addons")}>
                     Manage add-ons
