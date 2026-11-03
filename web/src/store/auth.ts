@@ -52,7 +52,7 @@ interface AuthState {
   /** Pulls the account's add-on list and reconciles it into the local store. */
   restoreAddons: () => Promise<{ restored: number; preserved: boolean }>;
   /** Writes the local add-on list back to the account. */
-  syncAddons: () => Promise<{ pushed: number }>;
+  syncAddons: (options?: { silent?: boolean }) => Promise<{ pushed: number }>;
 }
 
 /** Persisted snapshot of the membership, so a reload keeps the unlocked themes. */
@@ -231,19 +231,20 @@ export const useAuth = create<AuthState>()(
         }
       },
 
-      syncAddons: async () => {
+      syncAddons: async (options) => {
+        const silent = options?.silent ?? false;
         if (!get().session) return { pushed: 0 };
-        set({ restoringAddons: true });
+        if (!silent) set({ restoringAddons: true });
         try {
           const token = await get().ensureToken();
           if (!token) {
-            set({ restoringAddons: false });
+            if (!silent) set({ restoringAddons: false });
             return { pushed: 0 };
           }
           const owner = await getSyncOwner(token).catch(() => null);
           const userId = owner ?? get().session?.user.id ?? "";
           if (!userId) {
-            set({ restoringAddons: false });
+            if (!silent) set({ restoringAddons: false });
             return { pushed: 0 };
           }
 
@@ -259,22 +260,28 @@ export const useAuth = create<AuthState>()(
             SYNC_PROFILE_ID,
             token,
           );
-          set({ restoringAddons: false });
-          useUi
-            .getState()
-            .pushToast(
-              `Synced ${local.length} add-on${local.length === 1 ? "" : "s"} to your account`,
-              "success",
-            );
+          if (!silent) {
+            set({ restoringAddons: false });
+            useUi
+              .getState()
+              .pushToast(
+                `Synced ${local.length} add-on${local.length === 1 ? "" : "s"} to your account`,
+                "success",
+              );
+          }
           return { pushed: local.length };
         } catch (error) {
-          set({ restoringAddons: false });
-          useUi
-            .getState()
-            .pushToast(
-              error instanceof Error ? error.message : "Could not sync add-ons",
-              "error",
-            );
+          if (!silent) {
+            set({ restoringAddons: false });
+            useUi
+              .getState()
+              .pushToast(
+                error instanceof Error ? error.message : "Could not sync add-ons",
+                "error",
+              );
+          } else {
+            console.warn("[addons] background sync failed:", error);
+          }
           return { pushed: 0 };
         }
       },

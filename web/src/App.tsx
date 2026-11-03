@@ -5,6 +5,7 @@ import { Spinner } from "@/components/ui/Spinner";
 import { useThemeSync } from "@/hooks/useThemeSync";
 import { useSettings } from "@/store/settings";
 import { useAddons } from "@/store/addons";
+import { useAuth } from "@/store/auth";
 import { useProfiles } from "@/store/profiles";
 
 // Screens are code-split so the first paint stays light.
@@ -99,11 +100,20 @@ export default function App() {
   const onboarded = useSettings((state) => state.onboarded);
   const initDefaults = useAddons((state) => state.initDefaults);
   const ensureProfiles = useProfiles((state) => state.ensureProfiles);
+  const session = useAuth((state) => state.session);
+  const addonsRestored = useAuth((state) => state.addonsRestored);
+  const restoreAddons = useAuth((state) => state.restoreAddons);
 
   useEffect(() => {
     ensureProfiles();
-    if (onboarded) void initDefaults();
-  }, [ensureProfiles, initDefaults, onboarded]);
+    if (!onboarded) return;
+    // Seed local defaults first, then reconcile with the account list so a
+    // reloaded session pulls the same add-ons the TV sees (sign-in already
+    // restores, so this only fills the gap for persisted sessions).
+    void initDefaults().then(() => {
+      if (session && !addonsRestored) void restoreAddons();
+    });
+  }, [ensureProfiles, initDefaults, onboarded, session, addonsRestored, restoreAddons]);
 
   return (
     <Suspense fallback={<RouteFallback />}>
