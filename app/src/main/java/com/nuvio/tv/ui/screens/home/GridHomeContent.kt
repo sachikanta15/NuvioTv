@@ -109,6 +109,7 @@ fun GridHomeContent(
     onNavigateToCatalogSeeAll: (String, String, String) -> Unit,
     onNavigateToFolderDetail: (String, String) -> Unit = { _, _ -> },
     onRemoveContinueWatching: (String, Int?, Int?, Boolean) -> Unit,
+    onMarkContinueWatchingWatched: (ContinueWatchingItem) -> Unit = {},
     isCatalogItemWatched: (MetaPreview) -> Boolean = { false },
     onCatalogItemLongPress: (MetaPreview, String) -> Unit = { _, _ -> },
     posterCardStyle: PosterCardStyle = PosterCardDefaults.Style,
@@ -564,6 +565,7 @@ fun GridHomeContent(
                                 ""
                             )
                         },
+                        onMarkWatched = onMarkContinueWatchingWatched,
                         onRemoveItem = { item ->
                             val contentId = when (item) {
                                 is ContinueWatchingItem.InProgress -> item.progress.contentId
@@ -639,6 +641,7 @@ fun GridHomeContent(
                                 ""
                             )
                         },
+                        onMarkWatched = onMarkContinueWatchingWatched,
                         onRemoveItem = { item ->
                             val contentId = when (item) {
                                 is ContinueWatchingItem.InProgress -> item.progress.contentId
@@ -994,7 +997,7 @@ private fun SeeAllGridCard(
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                        contentDescription = label ?: stringResource(R.string.action_see_all),
+                        contentDescription = null,
                         modifier = Modifier.size(NuvioTheme.spacing.xxl),
                         tint = NuvioTheme.colors.TextSecondary
                     )

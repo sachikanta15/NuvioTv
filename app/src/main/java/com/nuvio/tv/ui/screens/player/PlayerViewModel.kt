@@ -280,6 +280,10 @@ class PlayerViewModel @Inject constructor(
         controller.pauseForLifecycle()
     }
 
+    fun releaseForBackground() {
+        controller.releaseForBackground()
+    }
+
     fun resumeForLifecycle() {
         controller.resumeForLifecycle()
     }
@@ -291,6 +295,10 @@ class PlayerViewModel @Inject constructor(
     fun onEvent(event: PlayerEvent) {
         controller.onEvent(event)
     }
+
+    fun playerMediaInfo(): PlayerMediaInfo = controller.playerMediaInfo()
+
+    fun playerStreamFilename(): String? = controller.currentFilename
 
     fun bindExoSubtitleView(subtitleView: androidx.media3.ui.SubtitleView?) {
         controller.bindExoSubtitleView(subtitleView)

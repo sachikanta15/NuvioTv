@@ -1,5 +1,6 @@
 package com.nuvio.tv.ui.screens.home
 
+import android.util.Log
 import android.content.Context
 import android.os.SystemClock
 import androidx.compose.runtime.mutableStateMapOf
@@ -693,6 +694,7 @@ class HomeViewModel @Inject constructor(
         when (event) {
             is HomeEvent.OnItemClick -> navigateToDetail(event.itemId, event.itemType)
             is HomeEvent.OnLoadMoreCatalog -> loadMoreCatalogItems(event.catalogId, event.addonId, event.type)
+            is HomeEvent.OnMarkContinueWatchingWatched -> markContinueWatchingWatched(event.item)
             is HomeEvent.OnRemoveContinueWatching -> removeContinueWatching(
                 contentId = event.contentId,
                 season = event.season,
@@ -734,7 +736,7 @@ class HomeViewModel @Inject constructor(
                         ),
                         episodeThumbnail = cached.episodeThumbnail,
                         episodeDescription = cached.episodeDescription,
-                        episodeImdbRating = cached.episodeImdbRating,
+                        episodeImdbRating = if (cached.ratingVisible) cached.episodeImdbRating else null,
                         genres = cached.genres,
                         releaseInfo = cached.releaseInfo
                     )
@@ -761,7 +763,7 @@ class HomeViewModel @Inject constructor(
                         hasAired = cached.hasAired,
                         airDateLabel = cached.airDateLabel,
                         lastWatched = cached.lastWatched,
-                        imdbRating = cached.imdbRating,
+                        imdbRating = if (cached.ratingVisible) cached.imdbRating else null,
                         genres = cached.genres,
                         releaseInfo = cached.releaseInfo,
                         sortTimestamp = cached.sortTimestamp,
@@ -800,6 +802,14 @@ class HomeViewModel @Inject constructor(
         episode = episode,
         isNextUp = isNextUp
     )
+
+    private fun markContinueWatchingWatched(item: ContinueWatchingItem) {
+        if (!item.canMarkWatched()) return
+        viewModelScope.launch {
+            runCatching { watchProgressRepository.markAsCompleted(item.toCompletedProgress()) }
+                .onFailure { error -> Log.w(TAG, "Failed to mark continue watching item as watched", error) }
+        }
+    }
 
     private fun observeCollections() = observeCollectionsPipeline()
 
