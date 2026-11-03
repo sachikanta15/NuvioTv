@@ -1,9 +1,0 @@
-{
-  "channels": {
-    "9450546": {
-      "name": "Eurosport HD",
-      "url": "http://localhost:5173/jiotv-api/playlist?u=https%3A%2F%2Fjiotvmblive.cdn.jio.com%2Fbpk-tv%2FDsports_HD_MOB%2FWDVLive%2Findex.mpd%3F__hdnea__%3Dst%3D1793589300~exp%3D1793675700~acl%3D%2F*~hmac%3Dd1569f5ba70557d2c24545b3863c40908e83bf9d2c9b8ce5b6cc11fe1fe99a73&k=6843545622aa27cab11368ffb3cae72a"
-    }
-  }
-}
-

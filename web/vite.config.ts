@@ -161,49 +161,12 @@ function vzyProxyPlugin(): Plugin {
   };
 }
 
-/** Automatically boots the local stream relay on :8090 if not already running. */
-function relayAutoStartPlugin(): Plugin {
-  return {
-    name: "nuvio-relay-autostart",
-    configureServer() {
-      const relayPath = fileURLToPath(
-        new URL("../relay/server.mjs", import.meta.url),
-      );
-      void import("node:http").then(({ default: http }) => {
-        const req = http.get("http://127.0.0.1:8090/health", (res) => {
-          if (res.statusCode === 200) {
-            console.log("[Relay] Stream relay is active on :8090");
-          }
-        });
-        req.on("error", () => {
-          void import("node:child_process").then(({ spawn }) => {
-            console.log("[Relay] Starting local stream relay on :8090...");
-            const child = spawn(process.execPath, [relayPath], {
-              stdio: "inherit",
-              detached: false,
-            });
-            child.on("error", (e) =>
-              console.warn("[Relay] Auto-spawn error:", e.message),
-            );
-            process.on("exit", () => child.kill());
-            process.on("SIGINT", () => {
-              child.kill();
-              process.exit(0);
-            });
-          });
-        });
-      });
-    },
-  };
-}
-
 export default defineConfig({
   plugins: [
     react(),
     streamProxyPlugin(),
     jiotvPlugin(),
     vzyProxyPlugin(),
-    relayAutoStartPlugin(),
   ],
   resolve: {
     alias: {
